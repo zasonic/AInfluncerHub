@@ -215,6 +215,18 @@ async def generate_dataset_images(
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
 
+
+@app.post("/api/dataset/{slug}/score")
+def score_dataset(slug: str):
+    proj = _load_project(slug)
+    images = proj.dataset_images()
+    if not images:
+        raise HTTPException(400, "No dataset images to score.")
+    from services.quality_scorer import score_images
+    results = score_images(images)
+    passed = [r for r in results if r["passed"]]
+    return {"scores": results, "passed": len(passed), "total": len(results)}
+
 # ── Captions ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/captions/{slug}")
@@ -262,7 +274,11 @@ def inject_trigger(slug: str):
 
 
 @app.get("/api/captions/{slug}/run")
-async def run_captioning(slug: str, hf_token: str = Query("")):
+async def run_captioning(
+    slug:     str,
+    hf_token: str = Query(""),
+    captioner: str = Query("florence2"),
+):
     proj   = _load_project(slug)
     images = proj.dataset_images()
     if not images:
@@ -278,7 +294,10 @@ async def run_captioning(slug: str, hf_token: str = Query("")):
 
     def _run():
         try:
-            from services.florence_captioner import caption_batch
+            if captioner == "joycaption":
+                from services.joy_captioner import caption_batch
+            else:
+                from services.florence_captioner import caption_batch
             caption_batch(
                 image_paths=images,
                 trigger_word=proj.trigger_word,

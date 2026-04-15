@@ -112,10 +112,27 @@ export const uploadDatasetImages = async (
 export const getDatasetImages = (slug: string) =>
   request<{ images: string[] }>("GET", `/api/dataset/${slug}/images`);
 
+export interface ImageScore {
+  path:             string;
+  filename:         string;
+  face_score:       number;
+  aesthetic_score:  number;
+  passed:           boolean;
+}
+
+export const scoreDataset = (slug: string) =>
+  request<{ scores: ImageScore[]; passed: number; total: number }>(
+    "POST", `/api/dataset/${slug}/score`
+  );
+
 /** Returns an EventSource streaming SSE progress events */
-export const startCaptioning = (slug: string, hf_token: string): EventSource =>
+export const startCaptioning = (
+  slug: string,
+  hf_token: string,
+  captioner: "florence2" | "joycaption" = "florence2"
+): EventSource =>
   new EventSource(
-    `${_baseUrl}/api/captions/${slug}/run?hf_token=${encodeURIComponent(hf_token)}`
+    `${_baseUrl}/api/captions/${slug}/run?hf_token=${encodeURIComponent(hf_token)}&captioner=${captioner}`
   );
 
 export const getCaptions = (slug: string) =>

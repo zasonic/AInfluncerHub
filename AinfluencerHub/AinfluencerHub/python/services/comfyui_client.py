@@ -272,7 +272,7 @@ class ComfyUIClient:
         image_path: Path,
         prompt: str,
         output_dir: Path,
-        wan_checkpoint: str = "wan2.1_i2v_480p_bf16.safetensors",
+        wan_checkpoint: str = "wan2.2_fun_i2v_480p_bf16.safetensors",
         progress_cb: Callable[[str], None] | None = None,
     ) -> Path | None:
         """Generate a video from a still image using Wan2.1 I2V in ComfyUI."""
@@ -326,7 +326,7 @@ class ComfyUIClient:
         self,
         source_image: str,
         prompt: str,
-        wan_checkpoint: str = "wan2.1_i2v_480p_bf16.safetensors",
+        wan_checkpoint: str = "wan2.2_fun_i2v_480p_bf16.safetensors",
         negative_prompt: str = "",
         num_frames: int = 81,
         steps: int = 20,

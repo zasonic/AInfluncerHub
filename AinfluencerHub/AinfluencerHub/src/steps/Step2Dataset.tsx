@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from "react";
-import { Upload } from "lucide-react";
+import { Upload, ShieldCheck } from "lucide-react";
 import { useStore } from "../store";
 import * as api from "../api";
+import type { ImageScore } from "../api";
 import { ImageGallery } from "../components/ImageGallery";
 import type { StreamEvent } from "../types";
 
@@ -35,6 +36,8 @@ export function Step2Dataset({ onAdvance }: Props) {
   const [count,       setCount]       = useState(25);
   const [images,      setImages]      = useState<{ path: string; filename: string }[]>([]);
   const [running,     setRunning]     = useState(false);
+  const [scoring,     setScoring]     = useState(false);
+  const [scores,      setScores]      = useState<ImageScore[] | null>(null);
   const [progress,    setProgress]    = useState({ done: 0, total: 0, message: "" });
   const [error,       setError]       = useState("");
 
@@ -110,7 +113,22 @@ export function Step2Dataset({ onAdvance }: Props) {
     }
   };
 
+  const runScoring = async () => {
+    if (!activeProject) return;
+    setScoring(true);
+    setError("");
+    try {
+      const result = await api.scoreDataset(activeProject.slug);
+      setScores(result.scores);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setScoring(false);
+    }
+  };
+
   const progressPct = progress.total > 0 ? (progress.done / progress.total) * 100 : 0;
+  const passedCount = scores?.filter((s) => s.passed).length ?? 0;
   const canAdvance  = images.length >= 5;
 
   return (
@@ -245,16 +263,31 @@ export function Step2Dataset({ onAdvance }: Props) {
                 style={{ marginBottom: 12 }}
               >
                 <h3>{images.length} images in dataset</h3>
-                {images.length < 20 && (
-                  <span className="badge badge-warning">
-                    Aim for at least 20 for best results
-                  </span>
-                )}
-                {images.length >= 20 && (
-                  <span className="badge badge-success">
-                    Ready to train
-                  </span>
-                )}
+                <div className="flex gap-8 items-center">
+                  {scores && (
+                    <span className={`badge ${passedCount === scores.length ? "badge-success" : "badge-warning"}`}>
+                      {passedCount}/{scores.length} passed quality check
+                    </span>
+                  )}
+                  {!scores && images.length < 20 && (
+                    <span className="badge badge-warning">
+                      Aim for at least 20 for best results
+                    </span>
+                  )}
+                  {!scores && images.length >= 20 && (
+                    <span className="badge badge-success">
+                      Ready to train
+                    </span>
+                  )}
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={runScoring}
+                    disabled={scoring || running}
+                  >
+                    <ShieldCheck size={13} />
+                    {scoring ? "Scoring..." : "Score quality"}
+                  </button>
+                </div>
               </div>
               <ImageGallery
                 images={images}

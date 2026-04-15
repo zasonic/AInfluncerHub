@@ -99,6 +99,7 @@ def build_yaml_config(
                         "noise_scheduler": "flowmatch",
                         "optimizer": "adamw8bit",
                         "learning_rate": float(learning_rate),
+                        "loraplus_lr_ratio": 16.0,
                         "lr_scheduler": "cosine_with_restarts",
                         "lr_warmup_steps": max(50, steps // 20),
                         "max_grad_norm": 1.0,

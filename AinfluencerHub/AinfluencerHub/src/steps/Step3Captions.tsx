@@ -21,6 +21,7 @@ export function Step3Captions({ onAdvance }: Props) {
   const [status,      setStatus]      = useState("");
   const [statusType,  setStatusType]  = useState<"ok" | "warn" | "error">("ok");
   const [error,       setError]       = useState("");
+  const [captioner,   setCaptioner]   = useState<"florence2" | "joycaption">("florence2");
 
   const sourceRef = useRef<EventSource | null>(null);
   const slug      = activeProject?.slug ?? "";
@@ -60,9 +61,10 @@ export function Step3Captions({ onAdvance }: Props) {
     const hf_token = settings?.hf_token ?? "";
     setRunning(true);
     setError("");
-    setProgress({ done: 0, total: images.length, message: "Loading Florence2..." });
+    const modelLabel = captioner === "joycaption" ? "JoyCaption" : "Florence2";
+    setProgress({ done: 0, total: images.length, message: `Loading ${modelLabel}...` });
 
-    const es = api.startCaptioning(slug, hf_token);
+    const es = api.startCaptioning(slug, hf_token, captioner);
     sourceRef.current = es;
     api.listenSSE(
       es,
@@ -267,6 +269,29 @@ export function Step3Captions({ onAdvance }: Props) {
             }}
           >
             <h4 style={{ marginBottom: 10 }}>Batch actions</h4>
+            <div className="field" style={{ margin: "0 0 10px 0" }}>
+              <label style={{ fontSize: 11 }}>Captioning model</label>
+              <div className="flex gap-8">
+                {(["florence2", "joycaption"] as const).map((c) => (
+                  <label
+                    key={c}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 5,
+                      cursor: "pointer", fontSize: 12,
+                      color: captioner === c ? "var(--text-primary)" : "var(--text-secondary)",
+                    }}
+                  >
+                    <input
+                      type="radio" name="captioner" value={c}
+                      checked={captioner === c}
+                      onChange={() => setCaptioner(c)}
+                      style={{ accentColor: "var(--accent)" }}
+                    />
+                    {c === "florence2" ? "Florence-2 (fast, 4 GB)" : "JoyCaption (best, 10 GB)"}
+                  </label>
+                ))}
+              </div>
+            </div>
             <div className="flex gap-8">
               <button
                 className="btn btn-ghost btn-sm"
