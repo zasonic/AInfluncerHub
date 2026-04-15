@@ -53,11 +53,10 @@ export function Step4Training({ onAdvance }: Props) {
   };
 
   const autoInstall = () => {
-    const dest = `${import.meta.env.HOME ?? "~"}/ai_tools/ai-toolkit`.replace("~", "");
     setInstalling(true);
     addLog("Starting ai-toolkit installation...");
 
-    const es = api.cloneAiToolkit(dest || "~/ai_tools/ai-toolkit");
+    const es = api.cloneAiToolkit("");
     sourceRef.current = es;
     api.listenSSE(
       es,

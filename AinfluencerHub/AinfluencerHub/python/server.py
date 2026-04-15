@@ -45,10 +45,10 @@ log = logging.getLogger("hub.server")
 settings = Settings()
 
 # GPU lock — one task at a time on 16 GB VRAM
-_gpu_lock     = threading.Lock()
-_gpu_holder   = ""
+_gpu_lock = threading.Lock()
 
 # Per-project training cancel events
+_cancel_lock = threading.Lock()
 _cancel_events: dict[str, threading.Event] = {}
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -149,14 +149,15 @@ def get_dataset_images(slug: str):
 async def upload_dataset(slug: str, files: list[UploadFile] = File(...)):
     proj = _load_project(slug)
     proj.dataset_dir.mkdir(parents=True, exist_ok=True)
+    existing = len(proj.dataset_images())
     count = 0
     for f in files:
         suffix = Path(f.filename or "img.jpg").suffix or ".jpg"
-        dest   = proj.dataset_dir / f"dataset_{count + 1:03d}{suffix}"
+        dest   = proj.dataset_dir / f"dataset_{existing + count + 1:03d}{suffix}"
         content = await f.read()
         dest.write_bytes(content)
         count += 1
-    proj.set("dataset_count", count)
+    proj.set("dataset_count", existing + count)
     proj.save()
     return {"count": count}
 
@@ -182,7 +183,8 @@ async def generate_fal(
 
     q      = queue.Queue()
     cancel = threading.Event()
-    _cancel_events[slug] = cancel
+    with _cancel_lock:
+        _cancel_events[slug] = cancel
 
     def _run():
         if not api_key.strip():
@@ -231,6 +233,8 @@ class CaptionBody(BaseModel):
 
 @app.put("/api/captions/{slug}/{stem}")
 def update_caption(slug: str, stem: str, body: CaptionBody):
+    if "/" in stem or "\\" in stem or ".." in stem:
+        raise HTTPException(400, "Invalid caption name.")
     proj = _load_project(slug)
     proj.captions_dir.mkdir(parents=True, exist_ok=True)
     txt_path = proj.captions_dir / f"{stem}.txt"
@@ -261,30 +265,32 @@ async def run_captioning(slug: str, hf_token: str = Query("")):
     if not images:
         raise HTTPException(400, "No dataset images found.")
 
-    if _gpu_lock.locked():
-        raise HTTPException(409, f"GPU is busy. Try again shortly.")
+    if not _gpu_lock.acquire(blocking=False):
+        raise HTTPException(409, "GPU is busy. Try again shortly.")
 
     q      = queue.Queue()
     cancel = threading.Event()
-    _cancel_events[slug] = cancel
+    with _cancel_lock:
+        _cancel_events[slug] = cancel
 
     def _run():
-        with _gpu_lock:
-            try:
-                from services.florence_captioner import caption_batch
-                caption_batch(
-                    image_paths=images,
-                    trigger_word=proj.trigger_word,
-                    hf_token=hf_token or None,
-                    progress_cb=lambda done, total, msg: q.put(
-                        {"type": "progress", "done": done, "total": total, "message": msg}
-                    ),
-                    cancel_event=cancel,
-                    captions_dir=proj.captions_dir,
-                )
-                q.put({"type": "done", "message": "Captioning complete."})
-            except Exception as exc:
-                q.put({"type": "error", "message": str(exc)})
+        try:
+            from services.florence_captioner import caption_batch
+            caption_batch(
+                image_paths=images,
+                trigger_word=proj.trigger_word,
+                hf_token=hf_token or None,
+                progress_cb=lambda done, total, msg: q.put(
+                    {"type": "progress", "done": done, "total": total, "message": msg}
+                ),
+                cancel_event=cancel,
+                captions_dir=proj.captions_dir,
+            )
+            q.put({"type": "done", "message": "Captioning complete."})
+        except Exception as exc:
+            q.put({"type": "error", "message": str(exc)})
+        finally:
+            _gpu_lock.release()
 
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
@@ -305,12 +311,13 @@ async def start_training(
         raise HTTPException(400, "ai_toolkit_path is required.")
     if not hf_token.strip():
         raise HTTPException(400, "hf_token is required.")
-    if _gpu_lock.locked():
+    if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy. Wait for the current task to finish.")
 
     q      = queue.Queue()
     cancel = threading.Event()
-    _cancel_events[slug] = cancel
+    with _cancel_lock:
+        _cancel_events[slug] = cancel
 
     # Save settings for next time
     settings.update({
@@ -322,33 +329,33 @@ async def start_training(
     })
 
     def _run():
-        import yaml
-        from services.lora_trainer import (
-            build_yaml_config,
-            prepare_training_folder,
-            run_training,
-        )
+        try:
+            import yaml
+            from services.lora_trainer import (
+                build_yaml_config,
+                prepare_training_folder,
+                run_training,
+            )
 
-        prepare_training_folder(proj.dataset_dir, proj.captions_dir)
+            prepare_training_folder(proj.dataset_dir, proj.captions_dir)
 
-        config_dict = build_yaml_config(
-            project_name=f"{proj.slug}_lora_v1",
-            trigger_word=proj.trigger_word,
-            dataset_dir=proj.dataset_dir,
-            captions_dir=proj.captions_dir,
-            output_dir=proj.lora_dir,
-            steps=steps,
-            rank=rank,
-            learning_rate=lr,
-            hf_token=hf_token,
-        )
-        config_path = proj.root / "training_config.yaml"
-        with open(config_path, "w") as f:
-            yaml.dump(config_dict, f, default_flow_style=False)
+            config_dict = build_yaml_config(
+                project_name=f"{proj.slug}_lora_v1",
+                trigger_word=proj.trigger_word,
+                dataset_dir=proj.dataset_dir,
+                captions_dir=proj.captions_dir,
+                output_dir=proj.lora_dir,
+                steps=steps,
+                rank=rank,
+                learning_rate=lr,
+                hf_token=hf_token,
+            )
+            config_path = proj.root / "training_config.yaml"
+            with open(config_path, "w") as f:
+                yaml.dump(config_dict, f, default_flow_style=False)
 
-        q.put({"type": "log", "line": f"Config written: {config_path}"})
+            q.put({"type": "log", "line": f"Config written: {config_path}"})
 
-        with _gpu_lock:
             success, message = run_training(
                 ai_toolkit_path=Path(ai_toolkit_path),
                 config_path=config_path,
@@ -357,19 +364,21 @@ async def start_training(
                 hf_token=hf_token,
             )
 
-        if success:
-            loras = sorted(
-                proj.lora_dir.glob("**/*.safetensors"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            lora_path = str(loras[0]) if loras else ""
-            proj.set("lora_path", lora_path)
-            proj.mark_step_done(4)
-            proj.save()
-            q.put({"type": "done", "message": "Training complete.", "payload": {"path": lora_path}})
-        else:
-            q.put({"type": "error", "message": message})
+            if success:
+                loras = sorted(
+                    proj.lora_dir.glob("**/*.safetensors"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                lora_path = str(loras[0]) if loras else ""
+                proj.set("lora_path", lora_path)
+                proj.mark_step_done(4)
+                proj.save()
+                q.put({"type": "done", "message": "Training complete.", "payload": {"path": lora_path}})
+            else:
+                q.put({"type": "error", "message": message})
+        finally:
+            _gpu_lock.release()
 
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
@@ -377,7 +386,8 @@ async def start_training(
 
 @app.post("/api/training/{slug}/cancel")
 def cancel_training(slug: str):
-    ev = _cancel_events.get(slug)
+    with _cancel_lock:
+        ev = _cancel_events.get(slug)
     if ev:
         ev.set()
     return {"ok": True}
@@ -415,34 +425,35 @@ async def generate_image(
     checkpoint:    str   = Query("zimage_turbo.safetensors"),
 ):
     proj = _load_project(slug)
-    if _gpu_lock.locked():
+    if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
 
     q = queue.Queue()
 
     def _run():
-        lora = proj.lora_path()
-        with _gpu_lock:
-            try:
-                from services.comfyui_client import ComfyUIClient
-                client = ComfyUIClient(settings.get("comfyui_url"))
-                if not client.ping():
-                    q.put({"type": "error", "message": "ComfyUI is not running. Start it in Pinokio."})
-                    return
-                q.put({"type": "progress", "done": 0, "total": 1, "message": "Submitting to ComfyUI..."})
-                paths = client.generate(
-                    positive_prompt=prompt,
-                    lora_path=str(lora) if lora else "",
-                    lora_strength=lora_strength,
-                    output_dir=proj.generated_dir,
-                    checkpoint=checkpoint,
-                    progress_cb=lambda msg: q.put(
-                        {"type": "progress", "done": 0, "total": 1, "message": msg}
-                    ),
-                )
-                q.put({"type": "done", "message": "Image generated.", "payload": {"paths": [str(p) for p in paths]}})
-            except Exception as exc:
-                q.put({"type": "error", "message": str(exc)})
+        try:
+            lora = proj.lora_path()
+            from services.comfyui_client import ComfyUIClient
+            client = ComfyUIClient(settings.get("comfyui_url"))
+            if not client.ping():
+                q.put({"type": "error", "message": "ComfyUI is not running. Start it in Pinokio."})
+                return
+            q.put({"type": "progress", "done": 0, "total": 1, "message": "Submitting to ComfyUI..."})
+            paths = client.generate(
+                positive_prompt=prompt,
+                lora_path=str(lora) if lora else "",
+                lora_strength=lora_strength,
+                output_dir=proj.generated_dir,
+                checkpoint=checkpoint,
+                progress_cb=lambda msg: q.put(
+                    {"type": "progress", "done": 0, "total": 1, "message": msg}
+                ),
+            )
+            q.put({"type": "done", "message": "Image generated.", "payload": {"paths": [str(p) for p in paths]}})
+        except Exception as exc:
+            q.put({"type": "error", "message": str(exc)})
+        finally:
+            _gpu_lock.release()
 
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
@@ -479,32 +490,33 @@ async def animate_image(
     proj = _load_project(slug)
     if not image_path:
         raise HTTPException(400, "image_path is required.")
-    if _gpu_lock.locked():
+    if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
 
     q = queue.Queue()
 
     def _run():
-        with _gpu_lock:
-            try:
-                from services.wangp_client import WanGPClient
-                client = WanGPClient(settings.get("wangp_url"))
-                if not client.ping():
-                    q.put({"type": "error", "message": "WanGP is not running. Start it in Pinokio."})
-                    return
-                q.put({"type": "progress", "done": 0, "total": 1, "message": "Sending to WanGP..."})
-                video = client.generate_video(
-                    image_path=Path(image_path),
-                    prompt=motion_prompt,
-                    output_dir=proj.videos_dir,
-                    progress_cb=lambda m: q.put(
-                        {"type": "progress", "done": 0, "total": 1, "message": m}
-                    ),
-                )
-                q.put({"type": "done", "message": "Video created.",
-                       "payload": {"path": str(video) if video else ""}})
-            except Exception as exc:
-                q.put({"type": "error", "message": str(exc)})
+        try:
+            from services.wangp_client import WanGPClient
+            client = WanGPClient(settings.get("wangp_url"))
+            if not client.ping():
+                q.put({"type": "error", "message": "WanGP is not running. Start it in Pinokio."})
+                return
+            q.put({"type": "progress", "done": 0, "total": 1, "message": "Sending to WanGP..."})
+            video = client.generate_video(
+                image_path=Path(image_path),
+                prompt=motion_prompt,
+                output_dir=proj.videos_dir,
+                progress_cb=lambda m: q.put(
+                    {"type": "progress", "done": 0, "total": 1, "message": m}
+                ),
+            )
+            q.put({"type": "done", "message": "Video created.",
+                   "payload": {"path": str(video) if video else ""}})
+        except Exception as exc:
+            q.put({"type": "error", "message": str(exc)})
+        finally:
+            _gpu_lock.release()
 
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
@@ -538,7 +550,10 @@ def update_settings(body: dict):
 
 @app.get("/api/files/image")
 def serve_image(path: str = Query(...)):
-    p = Path(path)
+    p = Path(path).resolve()
+    output_dir = settings.resolve_output_dir().resolve()
+    if not str(p).startswith(str(output_dir) + os.sep) and p != output_dir:
+        raise HTTPException(403, "Access denied.")
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "Image not found.")
     return FileResponse(p)

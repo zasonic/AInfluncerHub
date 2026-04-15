@@ -4,6 +4,7 @@ Salvaged from previous build; added to_dict() for FastAPI responses.
 """
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -11,6 +12,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("hub.project")
 
 
 def _slugify(name: str) -> str:
@@ -36,11 +39,12 @@ class Project:
         while root.exists():
             root = output_dir / f"{slug}_{suffix}"
             suffix += 1
+        actual_slug = root.name
         for sub in ("reference", "dataset", "captions", "lora", "generated", "videos"):
             (root / sub).mkdir(parents=True, exist_ok=True)
         data = {
             "name":          name,
-            "slug":          slug,
+            "slug":          actual_slug,
             "trigger_word":  trigger_word,
             "gender":        gender,
             "created_at":    datetime.now().isoformat(),
@@ -71,8 +75,8 @@ class Project:
             if child.is_dir() and (child / "project.json").exists():
                 try:
                     projects.append(cls.load(child))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("Skipping project %s: %s", child, exc)
         projects.sort(key=lambda p: p.get("created_at", ""), reverse=True)
         return projects
 
@@ -159,8 +163,8 @@ class Project:
                 with self._lock:
                     json.dump(self._d, f, indent=2)
             os.replace(tmp, path)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.error("Failed to save project %s: %s", self.root, exc)
 
     def delete(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)

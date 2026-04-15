@@ -9,7 +9,7 @@ interface Props {
   onAdvance: () => void;
 }
 
-type Method = "fal" | "manual" | "comfyui";
+type Method = "fal" | "manual";
 
 const METHODS: { id: Method; title: string; desc: string }[] = [
   {
@@ -22,17 +22,14 @@ const METHODS: { id: Method; title: string; desc: string }[] = [
     title: "Manual upload",
     desc:  "You provide 20 or more photos yourself. Best control — use real photos or images you already have.",
   },
-  {
-    id:    "comfyui",
-    title: "Local ComfyUI (advanced)",
-    desc:  "Uses your local ComfyUI instance. Requires ComfyUI running via Pinokio and a compatible model.",
-  },
 ];
 
 export function Step2Dataset({ onAdvance }: Props) {
   const { activeProject, settings, refreshProject } = useStore();
 
-  const [method,    setMethod]   = useState<Method>(settings?.dataset_method ?? "fal");
+  const [method,    setMethod]   = useState<Method>(
+    settings?.dataset_method === "manual" ? "manual" : "fal"
+  );
   const [falKey,    setFalKey]   = useState(settings?.fal_api_key ?? "");
   const [count,     setCount]    = useState(25);
   const [images,    setImages]   = useState<{ path: string; filename: string }[]>([]);
@@ -58,16 +55,12 @@ export function Step2Dataset({ onAdvance }: Props) {
     setRunning(true);
     setProgress({ done: 0, total: count, message: "Starting..." });
 
-    let es: EventSource;
-    if (method === "fal") {
-      if (!falKey.trim()) { setError("Please enter your fal.ai API key."); setRunning(false); return; }
-      es = api.startDatasetGenFal(activeProject.slug, count, falKey.trim());
-    } else if (method === "comfyui") {
-      es = api.startDatasetGenFal(activeProject.slug, count, "");  // backend handles comfyui path
-    } else {
+    if (method !== "fal") {
       setRunning(false);
       return;
     }
+    if (!falKey.trim()) { setError("Please enter your fal.ai API key."); setRunning(false); return; }
+    const es = api.startDatasetGenFal(activeProject.slug, count, falKey.trim());
 
     sourceRef.current = es;
     api.listenSSE(
