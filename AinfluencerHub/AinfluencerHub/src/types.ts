@@ -15,21 +15,20 @@ export interface Project {
 // ── Settings ──────────────────────────────────────────────────────────────
 
 export interface AppSettings {
-  comfyui_url:      string;
-  wangp_url:        string;
-  lm_studio_url:    string;
-  fal_api_key:      string;
-  hf_token:         string;
-  ai_toolkit_path:  string;
-  output_dir:       string;
-  dataset_method:   "fal" | "manual" | "comfyui";
-  training_steps:   number;
-  lora_rank:        number;
-  learning_rate:    string;
-  caption_model:    "florence2" | "lm_studio";
-  theme:            "dark";
-  last_project:     string;
-  setup_complete:   boolean;
+  comfyui_url:         string;
+  lm_studio_url:       string;
+  hf_token:            string;
+  ai_toolkit_path:     string;
+  output_dir:          string;
+  dataset_method:      "local" | "manual";
+  dataset_checkpoint:  string;
+  training_steps:      number;
+  lora_rank:           number;
+  learning_rate:       string;
+  caption_model:       "florence2" | "lm_studio";
+  theme:               "dark";
+  last_project:        string;
+  setup_complete:      boolean;
 }
 
 // ── Preflight ─────────────────────────────────────────────────────────────
@@ -40,11 +39,11 @@ export interface PreflightItem {
 }
 
 export interface PreflightResult {
-  comfyui:    PreflightItem;
-  wangp:      PreflightItem;
-  ai_toolkit: PreflightItem;
-  fal_key:    PreflightItem;
-  hf_token:   PreflightItem;
+  comfyui:         PreflightItem;
+  pulid_nodes:     PreflightItem;
+  wan_video_nodes: PreflightItem;
+  ai_toolkit:      PreflightItem;
+  hf_token:        PreflightItem;
 }
 
 // ── API responses ─────────────────────────────────────────────────────────

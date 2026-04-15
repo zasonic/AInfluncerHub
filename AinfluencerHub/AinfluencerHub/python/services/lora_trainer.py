@@ -177,6 +177,7 @@ def run_training(
 
     cmd = [sys.executable, str(run_py), str(config_path)]
 
+    proc = None
     try:
         proc = subprocess.Popen(
             cmd,
@@ -197,14 +198,29 @@ def run_training(
                     log_cb(line)
             if cancel_event and cancel_event.is_set():
                 proc.terminate()
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
                 return False, "Training cancelled by user."
 
-        proc.wait()
+        proc.wait(timeout=60)
 
         if proc.returncode == 0:
             return True, "Training completed successfully."
         else:
             return False, f"Training exited with code {proc.returncode}."
 
+    except subprocess.TimeoutExpired:
+        if proc:
+            proc.kill()
+        return False, "Training process timed out waiting to exit."
     except Exception as exc:
         return False, f"Failed to launch training: {exc}"
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass

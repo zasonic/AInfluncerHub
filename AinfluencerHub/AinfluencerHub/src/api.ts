@@ -12,7 +12,6 @@ import type {
   GeneratedVideo,
   PreflightResult,
   Project,
-  StreamEvent,
 } from "./types";
 
 let _baseUrl = "http://localhost:8765";
@@ -87,13 +86,13 @@ export const uploadReferences = async (
 
 // ── Dataset ────────────────────────────────────────────────────────────────
 
-export const startDatasetGenFal = (
-  slug:    string,
-  count:   number,
-  api_key: string
+export const startDatasetGen = (
+  slug:       string,
+  count:      number,
+  checkpoint: string
 ): EventSource =>
   new EventSource(
-    `${_baseUrl}/api/dataset/${slug}/generate-fal?count=${count}&api_key=${encodeURIComponent(api_key)}`
+    `${_baseUrl}/api/dataset/${slug}/generate?count=${count}&checkpoint=${encodeURIComponent(checkpoint)}`
   );
 
 export const uploadDatasetImages = async (
@@ -187,6 +186,16 @@ export const getGeneratedImages = (slug: string) =>
 
 export const getVideos = (slug: string) =>
   request<{ videos: GeneratedVideo[] }>("GET", `/api/studio/${slug}/videos`);
+
+// ── ComfyUI ────────────────────────────────────────────────────
+
+export const getCheckpoints = () =>
+  request<{ checkpoints: string[] }>("GET", "/api/comfyui/checkpoints");
+
+export const getComfyUIStatus = () =>
+  request<{ online: boolean; has_pulid: boolean; has_wan_video: boolean }>(
+    "GET", "/api/comfyui/status"
+  );
 
 // ── Settings ───────────────────────────────────────────────────────────────
 

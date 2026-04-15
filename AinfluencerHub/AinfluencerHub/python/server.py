@@ -162,16 +162,18 @@ async def upload_dataset(slug: str, files: list[UploadFile] = File(...)):
     return {"count": count}
 
 
-@app.get("/api/dataset/{slug}/generate-fal")
-async def generate_fal(
-    slug:    str,
-    count:   int   = Query(25),
-    api_key: str   = Query(""),
+@app.get("/api/dataset/{slug}/generate")
+async def generate_dataset_images(
+    slug:       str,
+    count:      int = Query(25),
+    checkpoint: str = Query(""),
 ):
     proj = _load_project(slug)
     refs = proj.reference_images()
     if not refs:
         raise HTTPException(400, "No reference images found for this influencer.")
+    if not checkpoint.strip():
+        raise HTTPException(400, "Select a checkpoint in ComfyUI first.")
 
     gender      = proj.gender
     prompt_file = ROOT / "assets" / "prompts" / (
@@ -187,17 +189,18 @@ async def generate_fal(
         _cancel_events[slug] = cancel
 
     def _run():
-        if not api_key.strip():
-            q.put({"type": "error", "message": "No fal.ai API key provided."})
-            return
         try:
-            from services.fal_generator import generate_dataset
-            generate_dataset(
+            from services.comfyui_client import ComfyUIClient
+            client = ComfyUIClient(settings.get("comfyui_url"))
+            if not client.ping():
+                q.put({"type": "error", "message": "ComfyUI is not running. Start it first."})
+                return
+            client.generate_dataset(
                 reference_image=refs[0],
                 prompts=prompts,
                 trigger_word=proj.trigger_word,
+                checkpoint=checkpoint,
                 output_dir=proj.dataset_dir,
-                api_key=api_key,
                 progress_cb=lambda done, total, msg: q.put(
                     {"type": "progress", "done": done, "total": total, "message": msg}
                 ),
@@ -497,12 +500,12 @@ async def animate_image(
 
     def _run():
         try:
-            from services.wangp_client import WanGPClient
-            client = WanGPClient(settings.get("wangp_url"))
+            from services.comfyui_client import ComfyUIClient
+            client = ComfyUIClient(settings.get("comfyui_url"))
             if not client.ping():
-                q.put({"type": "error", "message": "WanGP is not running. Start it in Pinokio."})
+                q.put({"type": "error", "message": "ComfyUI is not running. Start it first."})
                 return
-            q.put({"type": "progress", "done": 0, "total": 1, "message": "Sending to WanGP..."})
+            q.put({"type": "progress", "done": 0, "total": 1, "message": "Submitting video job to ComfyUI..."})
             video = client.generate_video(
                 image_path=Path(image_path),
                 prompt=motion_prompt,
@@ -532,6 +535,25 @@ def get_videos(slug: str):
     )
     return {
         "videos": [{"path": str(v), "filename": v.name} for v in vids]
+    }
+
+# ── ComfyUI info ─────────────────────────────────────────────────────────
+
+@app.get("/api/comfyui/checkpoints")
+def list_comfyui_checkpoints():
+    from services.comfyui_client import ComfyUIClient
+    client = ComfyUIClient(settings.get("comfyui_url"))
+    return {"checkpoints": client.list_checkpoints()}
+
+
+@app.get("/api/comfyui/status")
+def comfyui_status():
+    from services.comfyui_client import ComfyUIClient
+    client = ComfyUIClient(settings.get("comfyui_url"))
+    return {
+        "online":          client.ping(),
+        "has_pulid":       client.check_custom_nodes("pulid"),
+        "has_wan_video":   client.check_custom_nodes("wan_video"),
     }
 
 # ── Settings ──────────────────────────────────────────────────────────────────
