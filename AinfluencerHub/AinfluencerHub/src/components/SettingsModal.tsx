@@ -10,12 +10,9 @@ interface Props {
 
 const DEFAULTS: Partial<AppSettings> = {
   comfyui_url:     "http://localhost:8188",
-  wangp_url:       "http://localhost:7860",
-  lm_studio_url:   "http://localhost:1234",
   training_steps:  2000,
   lora_rank:       16,
   learning_rate:   "1e-4",
-  dataset_method:  "fal",
 };
 
 export function SettingsModal({ onClose }: Props) {
@@ -80,31 +77,15 @@ export function SettingsModal({ onClose }: Props) {
         <div className="field">
           <label>ComfyUI URL</label>
           <input type="url" placeholder="http://localhost:8188" {...field("comfyui_url")} />
-        </div>
-        <div className="field">
-          <label>WanGP URL</label>
-          <input type="url" placeholder="http://localhost:7860" {...field("wangp_url")} />
-        </div>
-        <div className="field">
-          <label>LM Studio URL</label>
-          <input type="url" placeholder="http://localhost:1234" {...field("lm_studio_url")} />
+          <span className="field-hint">ComfyUI handles all image/video generation locally.</span>
         </div>
 
         <div className="divider" />
 
         <h4 style={{ color: "var(--text-muted)", marginBottom: 12, fontSize: 10, letterSpacing: "0.8px", textTransform: "uppercase" }}>
-          API Keys
+          Tokens
         </h4>
 
-        <div className="field">
-          <label>fal.ai API key</label>
-          <input
-            type="password"
-            placeholder="Required for automatic dataset generation"
-            {...field("fal_api_key")}
-          />
-          <span className="field-hint">Get a free key at fal.ai — about $0.025 per image.</span>
-        </div>
         <div className="field">
           <label>HuggingFace token</label>
           <input

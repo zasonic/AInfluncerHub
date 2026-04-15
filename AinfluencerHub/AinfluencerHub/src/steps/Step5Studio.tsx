@@ -80,7 +80,7 @@ export function Step5Studio({ onAdvance }: Props) {
     if (!selectedImg || !slug) return;
     setVidError("");
     setAnimating(true);
-    setVidStatus("Sending to WanGP...");
+    setVidStatus("Generating video...");
 
     const es = api.animateImage(slug, selectedImg.path, motionPrompt);
     vidSourceRef.current = es;
@@ -116,7 +116,7 @@ export function Step5Studio({ onAdvance }: Props) {
       <div className="step-header">
         <h1>Content Studio</h1>
         <p>
-          Generate new images with your trained LoRA, then animate them into video using WanGP.
+          Generate new images with your trained LoRA, then animate them into video.
         </p>
       </div>
 
@@ -250,7 +250,7 @@ export function Step5Studio({ onAdvance }: Props) {
           >
             <h3 style={{ marginBottom: 6 }}>Animate to video</h3>
             <p className="text-xs text-muted">
-              Select an image on the left, describe the motion, then animate via WanGP.
+              Select an image on the left, describe the motion, then animate via ComfyUI.
             </p>
           </div>
 

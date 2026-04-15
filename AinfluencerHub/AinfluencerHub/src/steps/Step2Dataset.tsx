@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from "react";
-import { Upload } from "lucide-react";
+import { Upload, ShieldCheck } from "lucide-react";
 import { useStore } from "../store";
 import * as api from "../api";
+import type { ImageScore } from "../api";
 import { ImageGallery } from "../components/ImageGallery";
 import type { StreamEvent } from "../types";
 
@@ -9,65 +10,70 @@ interface Props {
   onAdvance: () => void;
 }
 
-type Method = "fal" | "manual" | "comfyui";
+type Method = "local" | "manual";
 
 const METHODS: { id: Method; title: string; desc: string }[] = [
   {
-    id:    "fal",
-    title: "Automatic — cloud generation",
-    desc:  "Uses Flux AI online to create 30 varied poses from 1 photo. Requires a fal.ai account. Cost: about $0.75 per influencer.",
+    id:    "local",
+    title: "Automatic — local generation",
+    desc:  "Uses PuLID-FLUX in ComfyUI to create varied poses from your reference photo. Free, runs on your GPU. Requires ComfyUI with PuLID-FLUX nodes.",
   },
   {
     id:    "manual",
     title: "Manual upload",
     desc:  "You provide 20 or more photos yourself. Best control — use real photos or images you already have.",
   },
-  {
-    id:    "comfyui",
-    title: "Local ComfyUI (advanced)",
-    desc:  "Uses your local ComfyUI instance. Requires ComfyUI running via Pinokio and a compatible model.",
-  },
 ];
 
 export function Step2Dataset({ onAdvance }: Props) {
   const { activeProject, settings, refreshProject } = useStore();
 
-  const [method,    setMethod]   = useState<Method>(settings?.dataset_method ?? "fal");
-  const [falKey,    setFalKey]   = useState(settings?.fal_api_key ?? "");
-  const [count,     setCount]    = useState(25);
-  const [images,    setImages]   = useState<{ path: string; filename: string }[]>([]);
-  const [running,   setRunning]  = useState(false);
-  const [progress,  setProgress] = useState({ done: 0, total: 0, message: "" });
-  const [error,     setError]    = useState("");
+  const [method,      setMethod]      = useState<Method>(
+    settings?.dataset_method === "manual" ? "manual" : "local"
+  );
+  const [checkpoint,  setCheckpoint]  = useState(settings?.dataset_checkpoint ?? "");
+  const [checkpoints, setCheckpoints] = useState<string[]>([]);
+  const [count,       setCount]       = useState(25);
+  const [images,      setImages]      = useState<{ path: string; filename: string }[]>([]);
+  const [running,     setRunning]     = useState(false);
+  const [scoring,     setScoring]     = useState(false);
+  const [scores,      setScores]      = useState<ImageScore[] | null>(null);
+  const [progress,    setProgress]    = useState({ done: 0, total: 0, message: "" });
+  const [error,       setError]       = useState("");
 
   const fileRef    = useRef<HTMLInputElement>(null);
   const sourceRef  = useRef<EventSource | null>(null);
 
+  // Load dataset images and available checkpoints
   useEffect(() => {
     if (activeProject) {
       api.getDatasetImages(activeProject.slug).then(({ images: imgs }) => {
         setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })));
       }).catch(() => {});
     }
+    api.getCheckpoints().then(({ checkpoints: ckpts }) => {
+      setCheckpoints(ckpts);
+      if (!checkpoint && ckpts.length > 0) setCheckpoint(ckpts[0]);
+    }).catch(() => {});
     return () => { sourceRef.current?.close(); };
   }, [activeProject]);
 
   const startGeneration = () => {
     if (!activeProject) return;
     setError("");
+
+    if (method !== "local") {
+      return;
+    }
+    if (!checkpoint.trim()) {
+      setError("Select a checkpoint first. Make sure ComfyUI is running.");
+      return;
+    }
+
     setRunning(true);
     setProgress({ done: 0, total: count, message: "Starting..." });
 
-    let es: EventSource;
-    if (method === "fal") {
-      if (!falKey.trim()) { setError("Please enter your fal.ai API key."); setRunning(false); return; }
-      es = api.startDatasetGenFal(activeProject.slug, count, falKey.trim());
-    } else if (method === "comfyui") {
-      es = api.startDatasetGenFal(activeProject.slug, count, "");  // backend handles comfyui path
-    } else {
-      setRunning(false);
-      return;
-    }
+    const es = api.startDatasetGen(activeProject.slug, count, checkpoint.trim());
 
     sourceRef.current = es;
     api.listenSSE(
@@ -107,7 +113,22 @@ export function Step2Dataset({ onAdvance }: Props) {
     }
   };
 
+  const runScoring = async () => {
+    if (!activeProject) return;
+    setScoring(true);
+    setError("");
+    try {
+      const result = await api.scoreDataset(activeProject.slug);
+      setScores(result.scores);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setScoring(false);
+    }
+  };
+
   const progressPct = progress.total > 0 ? (progress.done / progress.total) * 100 : 0;
+  const passedCount = scores?.filter((s) => s.passed).length ?? 0;
   const canAdvance  = images.length >= 5;
 
   return (
@@ -115,7 +136,7 @@ export function Step2Dataset({ onAdvance }: Props) {
       <div className="step-header">
         <h1>Generate dataset</h1>
         <p>
-          {activeProject?.name} needs 20–30 varied photos to learn from.
+          {activeProject?.name} needs 20-30 varied photos to learn from.
           Choose how to create them.
         </p>
       </div>
@@ -141,17 +162,26 @@ export function Step2Dataset({ onAdvance }: Props) {
           </div>
 
           {/* Method-specific config */}
-          {method === "fal" && (
+          {method === "local" && (
             <div className="card mb-20">
-              <div className="card-title mb-16">fal.ai configuration</div>
+              <div className="card-title mb-16">ComfyUI generation</div>
               <div className="field">
-                <label>API key</label>
-                <input
-                  type="password"
-                  placeholder="Paste your fal.ai API key"
-                  value={falKey}
-                  onChange={(e) => setFalKey(e.target.value)}
-                />
+                <label>Checkpoint</label>
+                <select
+                  value={checkpoint}
+                  onChange={(e) => setCheckpoint(e.target.value)}
+                  style={{ width: "100%", fontSize: 12 }}
+                >
+                  {checkpoints.length === 0 && (
+                    <option value="">No checkpoints found — is ComfyUI running?</option>
+                  )}
+                  {checkpoints.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+                <span className="field-hint">
+                  Select any FLUX-compatible checkpoint from your ComfyUI models folder
+                </span>
               </div>
               <div className="field">
                 <label>Images to generate: {count}</label>
@@ -233,16 +263,31 @@ export function Step2Dataset({ onAdvance }: Props) {
                 style={{ marginBottom: 12 }}
               >
                 <h3>{images.length} images in dataset</h3>
-                {images.length < 20 && (
-                  <span className="badge badge-warning">
-                    Aim for at least 20 for best results
-                  </span>
-                )}
-                {images.length >= 20 && (
-                  <span className="badge badge-success">
-                    Ready to train
-                  </span>
-                )}
+                <div className="flex gap-8 items-center">
+                  {scores && (
+                    <span className={`badge ${passedCount === scores.length ? "badge-success" : "badge-warning"}`}>
+                      {passedCount}/{scores.length} passed quality check
+                    </span>
+                  )}
+                  {!scores && images.length < 20 && (
+                    <span className="badge badge-warning">
+                      Aim for at least 20 for best results
+                    </span>
+                  )}
+                  {!scores && images.length >= 20 && (
+                    <span className="badge badge-success">
+                      Ready to train
+                    </span>
+                  )}
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={runScoring}
+                    disabled={scoring || running}
+                  >
+                    <ShieldCheck size={13} />
+                    {scoring ? "Scoring..." : "Score quality"}
+                  </button>
+                </div>
               </div>
               <ImageGallery
                 images={images}

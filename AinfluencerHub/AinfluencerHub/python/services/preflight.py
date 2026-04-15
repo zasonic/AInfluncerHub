@@ -3,19 +3,17 @@ services/preflight.py — Service availability checks and first-run setup.
 
 Checks performed on launch:
   1. ComfyUI running at configured URL
-  2. WanGP running at configured URL
-  3. ai-toolkit directory exists (offers to clone if not)
-  4. FAL API key present (if fal method selected)
+  2. PuLID-FLUX custom nodes installed in ComfyUI
+  3. Wan2.1 I2V video nodes installed in ComfyUI
+  4. ai-toolkit directory exists (offers to clone if not)
   5. HuggingFace token present (needed for Z-Image model download)
 
 All checks are non-blocking; results are returned as a dict.
 """
 
 import logging
-import os
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from typing import Callable
 
@@ -24,7 +22,7 @@ import requests
 log = logging.getLogger("hub.preflight")
 
 
-# ── individual checks ────────────────────────────────────────────────────────
+# ── individual checks ────────────────���─────────────────────────────��─────────
 
 def check_comfyui(url: str, timeout: int = 4) -> dict:
     """Ping ComfyUI's /system_stats endpoint."""
@@ -37,15 +35,38 @@ def check_comfyui(url: str, timeout: int = 4) -> dict:
         return {"ok": False, "detail": f"Not reachable ({_short(exc)})"}
 
 
-def check_wangp(url: str, timeout: int = 4) -> dict:
-    """Ping WanGP's root endpoint."""
+def check_pulid_nodes(url: str, timeout: int = 4) -> dict:
+    """Check that PuLID-FLUX custom nodes are installed in ComfyUI."""
+    required = ["PulidFluxModelLoader", "ApplyPulidFlux"]
     try:
-        r = requests.get(url.rstrip("/"), timeout=timeout)
-        if r.status_code < 500:
-            return {"ok": True, "detail": "Connected"}
-        return {"ok": False, "detail": f"HTTP {r.status_code}"}
+        for node in required:
+            r = requests.get(
+                f"{url.rstrip('/')}/object_info/{node}", timeout=timeout
+            )
+            if r.status_code != 200 or node not in r.json():
+                return {
+                    "ok": False,
+                    "detail": f"Missing node: {node}. Install ComfyUI-PuLID-Flux.",
+                }
+        return {"ok": True, "detail": "PuLID-FLUX nodes found"}
     except Exception as exc:
-        return {"ok": False, "detail": f"Not reachable ({_short(exc)})"}
+        return {"ok": False, "detail": f"Cannot check ({_short(exc)})"}
+
+
+def check_wan_video_nodes(url: str, timeout: int = 4) -> dict:
+    """Check that Wan2.1 I2V nodes are available in ComfyUI."""
+    try:
+        r = requests.get(
+            f"{url.rstrip('/')}/object_info/WanImageToVideo", timeout=timeout
+        )
+        if r.status_code == 200 and "WanImageToVideo" in r.json():
+            return {"ok": True, "detail": "Wan2.1 I2V nodes found"}
+        return {
+            "ok": False,
+            "detail": "Missing WanImageToVideo node. Update ComfyUI or install Wan video nodes.",
+        }
+    except Exception as exc:
+        return {"ok": False, "detail": f"Cannot check ({_short(exc)})"}
 
 
 def check_ai_toolkit(path: str) -> dict:
@@ -58,12 +79,6 @@ def check_ai_toolkit(path: str) -> dict:
     return {"ok": False, "detail": f"run.py not found in {path}"}
 
 
-def check_fal_key(key: str) -> dict:
-    if key and len(key) > 10:
-        return {"ok": True, "detail": "Key present"}
-    return {"ok": False, "detail": "No API key — needed for cloud dataset generation"}
-
-
 def check_hf_token(token: str) -> dict:
     if token and len(token) > 10:
         return {"ok": True, "detail": "Token present"}
@@ -72,16 +87,17 @@ def check_hf_token(token: str) -> dict:
 
 def run_all(settings) -> dict[str, dict]:
     """Run every check and return a combined status dict."""
+    comfyui_url = settings.get("comfyui_url")
     return {
-        "comfyui":    check_comfyui(settings.get("comfyui_url")),
-        "wangp":      check_wangp(settings.get("wangp_url")),
-        "ai_toolkit": check_ai_toolkit(settings.get("ai_toolkit_path")),
-        "fal_key":    check_fal_key(settings.get("fal_api_key")),
-        "hf_token":   check_hf_token(settings.get("hf_token")),
+        "comfyui":         check_comfyui(comfyui_url),
+        "pulid_nodes":     check_pulid_nodes(comfyui_url),
+        "wan_video_nodes": check_wan_video_nodes(comfyui_url),
+        "ai_toolkit":      check_ai_toolkit(settings.get("ai_toolkit_path")),
+        "hf_token":        check_hf_token(settings.get("hf_token")),
     }
 
 
-# ── ai-toolkit installer ─────────────────────────────────────────────────────
+# ── ai-toolkit installer ───────���────────────────────��────────────────────────
 
 def clone_ai_toolkit(
     dest: Path,
@@ -139,16 +155,16 @@ def clone_ai_toolkit(
             text=True,
         )
         if result.returncode != 0:
-            _emit(f"pip warning: {result.stderr[:300]}")
-        else:
-            _emit("Requirements installed.")
+            _emit(f"pip install failed: {result.stderr[:300]}")
+            return False, f"pip install failed — check your Python environment."
+        _emit("Requirements installed.")
     else:
         _emit("No requirements.txt found in ai-toolkit — skipping pip install.")
 
     return True, str(dest)
 
 
-# ── helper ─────────────────────────────────────────────────────────────────
+# ── helper ─��────────────────────���──────────────────────────────────────────
 
 def _short(exc: Exception) -> str:
     return str(exc)[:80]

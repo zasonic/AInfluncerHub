@@ -25,7 +25,6 @@ interface AppState {
 
   // GPU lock state (read from backend)
   gpuBusy:        boolean;
-  gpuHolder:      string;
 
   // Actions
   setProjects:     (p: Project[]) => void;
@@ -34,7 +33,7 @@ interface AppState {
   setLoading:      (b: boolean) => void;
   setError:        (msg: string) => void;
   setSettings:     (s: AppSettings) => void;
-  setGpuBusy:      (busy: boolean, holder?: string) => void;
+  setGpuBusy:      (busy: boolean) => void;
 
   // Async actions
   loadProjects:    () => Promise<void>;
@@ -51,7 +50,6 @@ export const useStore = create<AppState>((set, get) => ({
   error:          "",
   settings:       null,
   gpuBusy:        false,
-  gpuHolder:      "",
 
   setProjects:     (projects) => set({ projects }),
   setActiveProject:(activeProject) => set({ activeProject }),
@@ -59,7 +57,7 @@ export const useStore = create<AppState>((set, get) => ({
   setLoading:      (loading) => set({ loading }),
   setError:        (error) => set({ error }),
   setSettings:     (settings) => set({ settings }),
-  setGpuBusy:      (gpuBusy, gpuHolder = "") => set({ gpuBusy, gpuHolder }),
+  setGpuBusy:      (gpuBusy) => set({ gpuBusy }),
 
   loadProjects: async () => {
     set({ loading: true, error: "" });

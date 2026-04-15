@@ -12,7 +12,6 @@ import type {
   GeneratedVideo,
   PreflightResult,
   Project,
-  StreamEvent,
 } from "./types";
 
 let _baseUrl = "http://localhost:8765";
@@ -87,13 +86,13 @@ export const uploadReferences = async (
 
 // ── Dataset ────────────────────────────────────────────────────────────────
 
-export const startDatasetGenFal = (
-  slug:    string,
-  count:   number,
-  api_key: string
+export const startDatasetGen = (
+  slug:       string,
+  count:      number,
+  checkpoint: string
 ): EventSource =>
   new EventSource(
-    `${_baseUrl}/api/dataset/${slug}/generate-fal?count=${count}&api_key=${encodeURIComponent(api_key)}`
+    `${_baseUrl}/api/dataset/${slug}/generate?count=${count}&checkpoint=${encodeURIComponent(checkpoint)}`
   );
 
 export const uploadDatasetImages = async (
@@ -113,10 +112,27 @@ export const uploadDatasetImages = async (
 export const getDatasetImages = (slug: string) =>
   request<{ images: string[] }>("GET", `/api/dataset/${slug}/images`);
 
+export interface ImageScore {
+  path:             string;
+  filename:         string;
+  face_score:       number;
+  aesthetic_score:  number;
+  passed:           boolean;
+}
+
+export const scoreDataset = (slug: string) =>
+  request<{ scores: ImageScore[]; passed: number; total: number }>(
+    "POST", `/api/dataset/${slug}/score`
+  );
+
 /** Returns an EventSource streaming SSE progress events */
-export const startCaptioning = (slug: string, hf_token: string): EventSource =>
+export const startCaptioning = (
+  slug: string,
+  hf_token: string,
+  captioner: "florence2" | "joycaption" = "florence2"
+): EventSource =>
   new EventSource(
-    `${_baseUrl}/api/captions/${slug}/run?hf_token=${encodeURIComponent(hf_token)}`
+    `${_baseUrl}/api/captions/${slug}/run?hf_token=${encodeURIComponent(hf_token)}&captioner=${captioner}`
   );
 
 export const getCaptions = (slug: string) =>
@@ -187,6 +203,16 @@ export const getGeneratedImages = (slug: string) =>
 
 export const getVideos = (slug: string) =>
   request<{ videos: GeneratedVideo[] }>("GET", `/api/studio/${slug}/videos`);
+
+// ── ComfyUI ────────────────────────────────────────────────────
+
+export const getCheckpoints = () =>
+  request<{ checkpoints: string[] }>("GET", "/api/comfyui/checkpoints");
+
+export const getComfyUIStatus = () =>
+  request<{ online: boolean; has_pulid: boolean; has_wan_video: boolean }>(
+    "GET", "/api/comfyui/status"
+  );
 
 // ── Settings ───────────────────────────────────────────────────────────────
 
