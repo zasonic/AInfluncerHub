@@ -80,7 +80,7 @@ export function Step5Studio({ onAdvance }: Props) {
     if (!selectedImg || !slug) return;
     setVidError("");
     setAnimating(true);
-    setVidStatus("Sending to WanGP...");
+    setVidStatus("Generating video...");
 
     const es = api.animateImage(slug, selectedImg.path, motionPrompt);
     vidSourceRef.current = es;

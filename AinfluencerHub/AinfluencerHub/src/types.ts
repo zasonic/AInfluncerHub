@@ -16,7 +16,6 @@ export interface Project {
 
 export interface AppSettings {
   comfyui_url:         string;
-  lm_studio_url:       string;
   hf_token:            string;
   ai_toolkit_path:     string;
   output_dir:          string;
@@ -25,7 +24,6 @@ export interface AppSettings {
   training_steps:      number;
   lora_rank:           number;
   learning_rate:       string;
-  caption_model:       "florence2" | "lm_studio";
   theme:               "dark";
   last_project:        string;
   setup_complete:      boolean;

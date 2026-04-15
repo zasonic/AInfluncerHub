@@ -10,11 +10,9 @@ interface Props {
 
 const DEFAULTS: Partial<AppSettings> = {
   comfyui_url:     "http://localhost:8188",
-  lm_studio_url:   "http://localhost:1234",
   training_steps:  2000,
   lora_rank:       16,
   learning_rate:   "1e-4",
-  dataset_method:  "local",
 };
 
 export function SettingsModal({ onClose }: Props) {
@@ -80,10 +78,6 @@ export function SettingsModal({ onClose }: Props) {
           <label>ComfyUI URL</label>
           <input type="url" placeholder="http://localhost:8188" {...field("comfyui_url")} />
           <span className="field-hint">ComfyUI handles all image/video generation locally.</span>
-        </div>
-        <div className="field">
-          <label>LM Studio URL</label>
-          <input type="url" placeholder="http://localhost:1234" {...field("lm_studio_url")} />
         </div>
 
         <div className="divider" />

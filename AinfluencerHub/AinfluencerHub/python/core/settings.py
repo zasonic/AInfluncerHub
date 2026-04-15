@@ -14,7 +14,6 @@ log = logging.getLogger("hub.settings")
 
 DEFAULTS: dict[str, Any] = {
     "comfyui_url":          "http://localhost:8188",
-    "lm_studio_url":        "http://localhost:1234",
     "ai_toolkit_path":      "",
     "output_dir":           "",
     "hf_token":             "",
@@ -23,7 +22,6 @@ DEFAULTS: dict[str, Any] = {
     "training_steps":       2000,
     "lora_rank":            16,
     "learning_rate":        "1e-4",
-    "caption_model":        "florence2",
     "theme":                "dark",
     "last_project":         "",
     "setup_complete":       False,
