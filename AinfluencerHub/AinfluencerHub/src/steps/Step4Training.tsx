@@ -10,7 +10,6 @@ interface Props {
 export function Step4Training({ onAdvance }: Props) {
   const { activeProject, settings, refreshProject } = useStore();
 
-  const [tkPath,    setTkPath]    = useState(settings?.ai_toolkit_path ?? "");
   const [hfToken,   setHfToken]   = useState(settings?.hf_token ?? "");
   const [steps,     setSteps]     = useState(settings?.training_steps ?? 2000);
   const [rank,      setRank]      = useState(settings?.lora_rank ?? 16);
@@ -22,7 +21,6 @@ export function Step4Training({ onAdvance }: Props) {
   const [statusOk,  setStatusOk]  = useState(true);
   const [done,      setDone]      = useState(false);
   const [error,     setError]     = useState("");
-  const [installing, setInstalling] = useState(false);
 
   const sourceRef  = useRef<EventSource | null>(null);
   const logRef     = useRef<HTMLDivElement>(null);
@@ -44,40 +42,7 @@ export function Step4Training({ onAdvance }: Props) {
     setLogLines((prev) => [...prev.slice(-500), { text, type }]);
   };
 
-  const browsePath = async () => {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const p = await open({ directory: true, title: "Select ai-toolkit folder" });
-      if (p) setTkPath(String(p));
-    } catch { /* dev mode */ }
-  };
-
-  const autoInstall = () => {
-    setInstalling(true);
-    addLog("Starting ai-toolkit installation...");
-
-    const es = api.cloneAiToolkit("");
-    sourceRef.current = es;
-    api.listenSSE(
-      es,
-      (event: StreamEvent) => {
-        if (event.type === "log") addLog(event.line);
-        else if (event.type === "done") {
-          const payload = event.payload as { path: string } | undefined;
-          if (payload?.path) setTkPath(payload.path);
-          addLog("ai-toolkit installed successfully.");
-          setInstalling(false);
-        } else if (event.type === "error") {
-          addLog(event.message, "error");
-          setInstalling(false);
-        }
-      },
-      () => setInstalling(false)
-    );
-  };
-
   const validate = (): string | null => {
-    if (!tkPath.trim()) return "Set the ai-toolkit path first, or use Auto-install.";
     if (!hfToken.trim()) return "HuggingFace token is required to download the training model.";
     return null;
   };
@@ -92,7 +57,7 @@ export function Step4Training({ onAdvance }: Props) {
     setLogLines([]);
     addLog(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`);
 
-    const es = api.startTraining(slug, tkPath.trim(), hfToken.trim(), steps, rank, lr);
+    const es = api.startTraining(slug, hfToken.trim(), steps, rank, lr);
     sourceRef.current = es;
     api.listenSSE(
       es,
@@ -143,7 +108,7 @@ export function Step4Training({ onAdvance }: Props) {
       <div className="step-header">
         <h1>Train LoRA model</h1>
         <p>
-          This teaches the AI to recognise {activeProject?.name}. Training takes 1–3 hours
+          This teaches the AI to recognise {activeProject?.name}. Training takes 1-3 hours
           depending on your GPU.
         </p>
       </div>
@@ -162,40 +127,11 @@ export function Step4Training({ onAdvance }: Props) {
           {/* Config panel */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16, overflowY: "auto" }}>
             <div className="card">
-              <div className="card-title mb-16">ai-toolkit</div>
-
-              <div className="field">
-                <label>Folder path</label>
-                <div className="flex gap-8">
-                  <input
-                    type="text"
-                    placeholder="/path/to/ai-toolkit"
-                    value={tkPath}
-                    onChange={(e) => setTkPath(e.target.value)}
-                    style={{ fontSize: 12 }}
-                  />
-                  <button className="btn btn-ghost btn-sm" style={{ flexShrink: 0 }} onClick={browsePath}>
-                    Browse
-                  </button>
-                </div>
-              </div>
-
-              <button
-                className="btn btn-ghost btn-sm w-full"
-                onClick={autoInstall}
-                disabled={installing || running}
-                style={{ marginTop: 4 }}
-              >
-                {installing ? "Installing..." : "Auto-install ai-toolkit"}
-              </button>
-            </div>
-
-            <div className="card">
               <div className="card-title mb-16">HuggingFace token</div>
               <div className="field">
                 <input
                   type="password"
-                  placeholder="Required to download Z-Image Turbo"
+                  placeholder="Required to download base model"
                   value={hfToken}
                   onChange={(e) => setHfToken(e.target.value)}
                 />
@@ -339,7 +275,7 @@ export function Step4Training({ onAdvance }: Props) {
             <button
               className="btn btn-ghost"
               onClick={startTraining}
-              disabled={running || installing}
+              disabled={running}
             >
               Start training
             </button>

@@ -1,142 +1,24 @@
 """
-services/lora_trainer.py — ai-toolkit LoRA training wrapper.
+services/lora_trainer.py — Native LoRA training using diffusers + peft + accelerate.
 
-Generates a YAML config for Z-Image Turbo training and launches
-ai-toolkit's run.py as a subprocess, streaming stdout/stderr back
-through a callback so the UI can display a live log.
+Trains a LoRA adapter on the SDXL UNet using the user's dataset of
+captioned images.  Replaces the previous ai-toolkit subprocess approach
+with a fully native training loop.
 
-ai-toolkit must be cloned before calling this.  Use
-services/preflight.py:clone_ai_toolkit() for first-run setup.
+Training produces .safetensors LoRA weights that are directly loadable
+by the diffusion_pipeline for inference.
 """
 
 import logging
-import os
-import subprocess
-import sys
+import math
+import shutil
 import threading
 from pathlib import Path
 from typing import Callable
 
-import yaml
-
 log = logging.getLogger("hub.trainer")
 
-ZIMAGE_MODEL_ID  = "Ostris/zimage_turbo"
-ZIMAGE_ADAPTER   = "ostris/zimage_turbo_training_adapter"
-
-
-def build_yaml_config(
-    project_name: str,
-    trigger_word: str,
-    dataset_dir: Path,
-    captions_dir: Path,
-    output_dir: Path,
-    steps: int = 2000,
-    rank: int = 16,
-    learning_rate: str = "1e-4",
-    hf_token: str = "",
-    sample_prompt: str = "",
-) -> dict:
-    """
-    Return an ai-toolkit YAML config dict for Z-Image Turbo LoRA training.
-    """
-    # Caption files live in captions_dir but images are in dataset_dir.
-    # ai-toolkit expects image + .txt in the same folder.
-    # We use dataset_dir as the training folder and symlink/copy captions there.
-    # Simplest: set caption_ext and let ai-toolkit look for .txt next to images.
-    # We copy captions into dataset_dir during the training-prep phase.
-
-    sample_prompts = []
-    if sample_prompt:
-        sample_prompts.append(f"{trigger_word}, {sample_prompt}")
-    else:
-        sample_prompts.append(
-            f"{trigger_word}, portrait photo of a person, "
-            "professional photography, sharp focus"
-        )
-
-    config = {
-        "job": "extension",
-        "config": {
-            "name": project_name,
-            "process": [
-                {
-                    "type": "sd_trainer",
-                    "training_folder": str(output_dir),
-                    "device": "cuda:0",
-                    "trigger_word": trigger_word,
-
-                    "network": {
-                        "type": "lora",
-                        "linear": rank,
-                        "linear_alpha": rank,
-                    },
-
-                    "save": {
-                        "dtype": "float16",
-                        "save_every": max(250, steps // 8),
-                        "max_step_saves_to_keep": 4,
-                    },
-
-                    "datasets": [
-                        {
-                            "folder_path": str(dataset_dir),
-                            "caption_ext": "txt",
-                            "caption_dropout_rate": 0.05,
-                            "shuffle_tokens": False,
-                            "cache_latents_to_disk": True,
-                            "resolution": [1024, 1024],
-                        }
-                    ],
-
-                    "train": {
-                        "batch_size": 1,
-                        "steps": steps,
-                        "gradient_accumulation_steps": 4,
-                        "train_unet": True,
-                        "train_text_encoder": False,
-                        "gradient_checkpointing": True,
-                        "noise_scheduler": "flowmatch",
-                        "optimizer": "adamw8bit",
-                        "learning_rate": float(learning_rate),
-                        "loraplus_lr_ratio": 16.0,
-                        "lr_scheduler": "cosine_with_restarts",
-                        "lr_warmup_steps": max(50, steps // 20),
-                        "max_grad_norm": 1.0,
-                        "ema_config": {
-                            "use_ema": True,
-                            "ema_decay": 0.99,
-                        },
-                    },
-
-                    "model": {
-                        "name_or_path": ZIMAGE_MODEL_ID,
-                        "assistant_lora_path": ZIMAGE_ADAPTER,
-                        "is_flux": False,
-                        "quantize": False,
-                    },
-
-                    "sample": {
-                        "sampler": "flowmatch",
-                        "sample_every": max(250, steps // 8),
-                        "width": 1024,
-                        "height": 1024,
-                        "prompts": sample_prompts,
-                        "neg": "",
-                        "seed": 42,
-                        "walk_seed": True,
-                        "guidance_scale": 3.5,
-                        "sample_steps": 8,
-                    },
-                }
-            ],
-        },
-        "meta": {
-            "name": "@file",
-            "version": "1.0",
-        },
-    }
-    return config
+BASE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 
 
 def prepare_training_folder(
@@ -145,9 +27,8 @@ def prepare_training_folder(
 ) -> None:
     """
     Copy .txt captions from captions_dir into dataset_dir so that
-    ai-toolkit can find image + caption pairs in one folder.
+    the training loop can find image + caption pairs in one folder.
     """
-    import shutil
     for txt in captions_dir.glob("*.txt"):
         dest = dataset_dir / txt.name
         if not dest.exists():
@@ -155,73 +36,331 @@ def prepare_training_folder(
 
 
 def run_training(
-    ai_toolkit_path: Path,
-    config_path: Path,
-    log_cb: Callable[[str], None] | None = None,
-    cancel_event=None,
+    dataset_dir: Path,
+    output_dir: Path,
+    trigger_word: str = "",
+    steps: int = 2000,
+    rank: int = 16,
+    learning_rate: float = 1e-4,
     hf_token: str = "",
+    log_cb: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[bool, str]:
     """
-    Launch ai-toolkit run.py with the given config and stream output
-    line by line through log_cb.
+    Train a LoRA adapter on the SDXL UNet using the user's image-caption
+    dataset.
 
-    Returns (success, final_message).
+    Returns (success, message).
     """
-    run_py = Path(ai_toolkit_path) / "run.py"
-    if not run_py.exists():
-        return False, f"run.py not found at {ai_toolkit_path}"
+    import os
+    import torch
+    import torch.nn.functional as F
+    from PIL import Image
+    from torch.utils.data import DataLoader, Dataset
+    from torchvision import transforms
 
-    env = os.environ.copy()
+    def _emit(msg: str) -> None:
+        log.info(msg)
+        if log_cb:
+            log_cb(msg)
+
     if hf_token:
-        env["HF_TOKEN"] = hf_token
-        env["HUGGING_FACE_HUB_TOKEN"] = hf_token
+        os.environ["HF_TOKEN"] = hf_token
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
 
-    cmd = [sys.executable, str(run_py), str(config_path)]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    proc = None
+    # ── Step 1: Collect image-caption pairs ──────────────────────────────
+
+    _emit("Collecting dataset...")
+    image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    pairs: list[tuple[Path, str]] = []
+    for img_path in sorted(dataset_dir.iterdir()):
+        if img_path.suffix.lower() not in image_exts:
+            continue
+        txt_path = dataset_dir / f"{img_path.stem}.txt"
+        caption = txt_path.read_text(encoding="utf-8").strip() if txt_path.exists() else ""
+        if not caption and trigger_word:
+            caption = trigger_word
+        pairs.append((img_path, caption))
+
+    if not pairs:
+        return False, f"No image-caption pairs found in {dataset_dir}"
+
+    _emit(f"Found {len(pairs)} image-caption pairs.")
+
+    # ── Step 2: Load model components ────────────────────────────────────
+
+    _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
+
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(ai_toolkit_path),
-            env=env,
+        from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
+        from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+
+        tokenizer_1 = CLIPTokenizer.from_pretrained(
+            BASE_MODEL_ID, subfolder="tokenizer", token=hf_token or None,
         )
-
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line:
-                log.debug("[ai-toolkit] %s", line)
-                if log_cb:
-                    log_cb(line)
-            if cancel_event and cancel_event.is_set():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                return False, "Training cancelled by user."
-
-        proc.wait(timeout=60)
-
-        if proc.returncode == 0:
-            return True, "Training completed successfully."
-        else:
-            return False, f"Training exited with code {proc.returncode}."
-
-    except subprocess.TimeoutExpired:
-        if proc:
-            proc.kill()
-        return False, "Training process timed out waiting to exit."
+        tokenizer_2 = CLIPTokenizer.from_pretrained(
+            BASE_MODEL_ID, subfolder="tokenizer_2", token=hf_token or None,
+        )
+        text_encoder_1 = CLIPTextModel.from_pretrained(
+            BASE_MODEL_ID, subfolder="text_encoder",
+            torch_dtype=weight_dtype, token=hf_token or None,
+        ).to(device)
+        text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+            BASE_MODEL_ID, subfolder="text_encoder_2",
+            torch_dtype=weight_dtype, token=hf_token or None,
+        ).to(device)
+        vae = AutoencoderKL.from_pretrained(
+            BASE_MODEL_ID, subfolder="vae",
+            torch_dtype=weight_dtype, token=hf_token or None,
+        ).to(device)
+        unet = UNet2DConditionModel.from_pretrained(
+            BASE_MODEL_ID, subfolder="unet",
+            torch_dtype=weight_dtype, token=hf_token or None,
+        ).to(device)
+        noise_scheduler = DDPMScheduler.from_pretrained(
+            BASE_MODEL_ID, subfolder="scheduler", token=hf_token or None,
+        )
     except Exception as exc:
-        return False, f"Failed to launch training: {exc}"
-    finally:
-        if proc and proc.poll() is None:
-            proc.kill()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                pass
+        return False, f"Failed to load model: {exc}"
+
+    _emit("Model loaded. Configuring LoRA...")
+
+    # Freeze base model
+    text_encoder_1.requires_grad_(False)
+    text_encoder_2.requires_grad_(False)
+    vae.requires_grad_(False)
+    unet.requires_grad_(False)
+
+    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────
+
+    from peft import LoraConfig, get_peft_model
+
+    lora_config = LoraConfig(
+        r=rank,
+        lora_alpha=rank,
+        init_lora_weights="gaussian",
+        target_modules=[
+            "to_k", "to_q", "to_v", "to_out.0",
+            "proj_in", "proj_out",
+            "ff.net.0.proj", "ff.net.2",
+        ],
+    )
+    unet = get_peft_model(unet, lora_config)
+    unet.train()
+
+    trainable_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in unet.parameters())
+    _emit(f"LoRA: {trainable_params:,} trainable params / {total_params:,} total ({100 * trainable_params / total_params:.2f}%)")
+
+    # Enable gradient checkpointing
+    unet.enable_gradient_checkpointing()
+
+    # ── Step 4: Build dataset & dataloader ───────────────────────────────
+
+    class CaptionImageDataset(Dataset):
+        def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
+            self.pairs = pairs
+            self.tokenizer_1 = tokenizer_1
+            self.tokenizer_2 = tokenizer_2
+            self.transform = transforms.Compose([
+                transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(resolution),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ])
+
+        def __len__(self):
+            return len(self.pairs)
+
+        def __getitem__(self, idx):
+            img_path, caption = self.pairs[idx]
+            image = Image.open(img_path).convert("RGB")
+            pixel_values = self.transform(image)
+
+            tokens_1 = self.tokenizer_1(
+                caption, max_length=77, padding="max_length",
+                truncation=True, return_tensors="pt",
+            )
+            tokens_2 = self.tokenizer_2(
+                caption, max_length=77, padding="max_length",
+                truncation=True, return_tensors="pt",
+            )
+
+            return {
+                "pixel_values": pixel_values,
+                "input_ids_1": tokens_1.input_ids.squeeze(0),
+                "input_ids_2": tokens_2.input_ids.squeeze(0),
+            }
+
+    dataset = CaptionImageDataset(pairs, tokenizer_1, tokenizer_2)
+    dataloader = DataLoader(
+        dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
+    )
+
+    # ── Step 5: Optimizer & scheduler ────────────────────────────────────
+
+    try:
+        from bitsandbytes.optim import AdamW8bit
+        optimizer = AdamW8bit(
+            unet.parameters(),
+            lr=learning_rate,
+            weight_decay=1e-2,
+        )
+        _emit("Using AdamW8bit optimizer.")
+    except ImportError:
+        optimizer = torch.optim.AdamW(
+            unet.parameters(),
+            lr=learning_rate,
+            weight_decay=1e-2,
+        )
+        _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+
+    # Cosine LR scheduler with warmup
+    warmup_steps = max(50, steps // 20)
+    from torch.optim.lr_scheduler import CosineAnnealingLR
+    scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+
+    # ── Step 6: Training loop ────────────────────────────────────────────
+
+    _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
+    gradient_accumulation_steps = 4
+    global_step = 0
+    running_loss = 0.0
+    save_every = max(250, steps // 8)
+
+    data_iter = iter(dataloader)
+
+    while global_step < steps:
+        if cancel_event and cancel_event.is_set():
+            _emit("Training cancelled by user.")
+            _cleanup(unet, vae, text_encoder_1, text_encoder_2)
+            return False, "Training cancelled by user."
+
+        # Get next batch (cycle through dataset)
+        try:
+            batch = next(data_iter)
+        except StopIteration:
+            data_iter = iter(dataloader)
+            batch = next(data_iter)
+
+        pixel_values = batch["pixel_values"].to(device, dtype=weight_dtype)
+        input_ids_1 = batch["input_ids_1"].to(device)
+        input_ids_2 = batch["input_ids_2"].to(device)
+
+        # Encode images to latents
+        with torch.no_grad():
+            latents = vae.encode(pixel_values).latent_dist.sample()
+            latents = latents * vae.config.scaling_factor
+
+        # Encode text
+        with torch.no_grad():
+            encoder_output_1 = text_encoder_1(input_ids_1, output_hidden_states=True)
+            encoder_output_2 = text_encoder_2(input_ids_2, output_hidden_states=True)
+            # SDXL uses penultimate hidden states
+            text_embeds_1 = encoder_output_1.hidden_states[-2]
+            text_embeds_2 = encoder_output_2.hidden_states[-2]
+            prompt_embeds = torch.cat([text_embeds_1, text_embeds_2], dim=-1)
+            # Pooled output from text_encoder_2
+            pooled_prompt_embeds = encoder_output_2[0]
+
+        # Add noise
+        noise = torch.randn_like(latents)
+        timesteps = torch.randint(
+            0, noise_scheduler.config.num_train_timesteps,
+            (latents.shape[0],), device=device,
+        ).long()
+        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+
+        # Time IDs for SDXL (original_size + crop_coords + target_size)
+        add_time_ids = torch.tensor(
+            [[1024, 1024, 0, 0, 1024, 1024]], dtype=weight_dtype, device=device,
+        )
+        added_cond_kwargs = {
+            "text_embeds": pooled_prompt_embeds,
+            "time_ids": add_time_ids,
+        }
+
+        # Forward pass
+        model_pred = unet(
+            noisy_latents, timesteps, prompt_embeds,
+            added_cond_kwargs=added_cond_kwargs,
+        ).sample
+
+        # Loss (predict noise)
+        loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+        loss = loss / gradient_accumulation_steps
+        loss.backward()
+
+        running_loss += loss.item() * gradient_accumulation_steps
+        global_step += 1
+
+        # Gradient accumulation step
+        if global_step % gradient_accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(unet.parameters(), 1.0)
+            optimizer.step()
+            if global_step > warmup_steps:
+                scheduler.step()
+            optimizer.zero_grad()
+
+        # Warmup (linear)
+        if global_step <= warmup_steps:
+            warmup_lr = learning_rate * (global_step / warmup_steps)
+            for pg in optimizer.param_groups:
+                pg["lr"] = warmup_lr
+
+        # Logging
+        if global_step % 10 == 0 or global_step == 1:
+            avg_loss = running_loss / 10 if global_step > 10 else running_loss
+            running_loss = 0.0
+            current_lr = optimizer.param_groups[0]["lr"]
+            _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
+
+        # Save checkpoint
+        if global_step % save_every == 0 and global_step < steps:
+            ckpt_path = output_dir / f"checkpoint-{global_step}"
+            ckpt_path.mkdir(parents=True, exist_ok=True)
+            unet.save_pretrained(ckpt_path)
+            _emit(f"Checkpoint saved: {ckpt_path}")
+
+    # ── Step 7: Save final LoRA ──────────────────────────────────────────
+
+    _emit("Saving final LoRA weights...")
+    final_path = output_dir / f"lora_rank{rank}_steps{steps}"
+    final_path.mkdir(parents=True, exist_ok=True)
+    unet.save_pretrained(final_path)
+
+    # Also save as a single safetensors file for easy loading
+    try:
+        from peft.utils import get_peft_model_state_dict
+        from safetensors.torch import save_file
+
+        state_dict = get_peft_model_state_dict(unet)
+        safetensors_path = output_dir / f"lora_rank{rank}_steps{steps}.safetensors"
+        save_file(state_dict, str(safetensors_path))
+        _emit(f"LoRA saved: {safetensors_path}")
+    except Exception as exc:
+        _emit(f"Warning: Could not save single safetensors file: {exc}")
+        safetensors_path = final_path
+
+    _cleanup(unet, vae, text_encoder_1, text_encoder_2)
+    return True, str(safetensors_path if safetensors_path.exists() else final_path)
+
+
+def _cleanup(*models) -> None:
+    """Free GPU memory."""
+    import torch
+
+    for model in models:
+        try:
+            del model
+        except Exception:
+            pass
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    log.info("Training models unloaded.")

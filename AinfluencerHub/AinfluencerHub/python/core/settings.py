@@ -1,6 +1,8 @@
 """
 core/settings.py — Persistent JSON settings store.
-Shared path with the previous build so user settings carry over.
+
+All settings for the self-contained native pipeline.
+No external service URLs or tool paths needed.
 """
 
 import json
@@ -13,15 +15,14 @@ from typing import Any
 log = logging.getLogger("hub.settings")
 
 DEFAULTS: dict[str, Any] = {
-    "comfyui_url":          "http://localhost:8188",
-    "ai_toolkit_path":      "",
     "output_dir":           "",
     "hf_token":             "",
     "dataset_method":       "local",
-    "dataset_checkpoint":   "",
     "training_steps":       2000,
     "lora_rank":            16,
     "learning_rate":        "1e-4",
+    "preferred_model":      "sdxl",
+    "video_model":          "wan2.1",
     "theme":                "dark",
     "last_project":         "",
     "setup_complete":       False,

@@ -9,15 +9,24 @@ Pillow>=10.0.0
 numpy>=1.24.0
 pyiqa>=0.1.12
 
-# HuggingFace / training
+# HuggingFace / diffusion / training
+diffusers>=0.30.0
 transformers>=4.51.0
 huggingface_hub>=0.23.0
 safetensors>=0.4.2
 accelerate>=0.30.0
 peft>=0.10.0
 bitsandbytes>=0.43.0
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Face-consistent generation (IP-Adapter)
+insightface>=0.7.3
+onnxruntime-gpu>=1.17.0
+
+# Video generation
+imageio[ffmpeg]>=2.31.0
 
 # Utilities
 requests>=2.31.0
-gitpython>=3.1.40
 pyyaml>=6.0.1

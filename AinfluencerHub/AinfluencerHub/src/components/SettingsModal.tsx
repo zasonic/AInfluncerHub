@@ -9,7 +9,6 @@ interface Props {
 }
 
 const DEFAULTS: Partial<AppSettings> = {
-  comfyui_url:     "http://localhost:8188",
   training_steps:  2000,
   lora_rank:       16,
   learning_rate:   "1e-4",
@@ -43,14 +42,6 @@ export function SettingsModal({ onClose }: Props) {
     setSaving(false);
   };
 
-  const browseToolkit = async () => {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const path = await open({ directory: true, title: "Select ai-toolkit folder" });
-      if (path) setForm((f) => ({ ...f, ai_toolkit_path: String(path) }));
-    } catch { /* no Tauri in dev mode */ }
-  };
-
   const browseOutput = async () => {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -69,28 +60,15 @@ export function SettingsModal({ onClose }: Props) {
           </button>
         </div>
 
-        {/* Service endpoints */}
         <h4 style={{ color: "var(--text-muted)", marginBottom: 12, fontSize: 10, letterSpacing: "0.8px", textTransform: "uppercase" }}>
-          Service Endpoints
-        </h4>
-
-        <div className="field">
-          <label>ComfyUI URL</label>
-          <input type="url" placeholder="http://localhost:8188" {...field("comfyui_url")} />
-          <span className="field-hint">ComfyUI handles all image/video generation locally.</span>
-        </div>
-
-        <div className="divider" />
-
-        <h4 style={{ color: "var(--text-muted)", marginBottom: 12, fontSize: 10, letterSpacing: "0.8px", textTransform: "uppercase" }}>
-          Tokens
+          Authentication
         </h4>
 
         <div className="field">
           <label>HuggingFace token</label>
           <input
             type="password"
-            placeholder="Required to download training models"
+            placeholder="Required to download AI models"
             {...field("hf_token")}
           />
           <span className="field-hint">Generate a token at huggingface.co/settings/tokens (read access is enough).</span>
@@ -99,18 +77,8 @@ export function SettingsModal({ onClose }: Props) {
         <div className="divider" />
 
         <h4 style={{ color: "var(--text-muted)", marginBottom: 12, fontSize: 10, letterSpacing: "0.8px", textTransform: "uppercase" }}>
-          Folder Paths
+          Storage
         </h4>
-
-        <div className="field">
-          <label>ai-toolkit folder</label>
-          <div className="flex gap-8">
-            <input type="text" placeholder="Path to the cloned ai-toolkit repository" {...field("ai_toolkit_path")} />
-            <button className="btn btn-ghost btn-sm" style={{ flexShrink: 0 }} onClick={browseToolkit}>
-              Browse
-            </button>
-          </div>
-        </div>
 
         <div className="field">
           <label>Output folder</label>
@@ -124,6 +92,38 @@ export function SettingsModal({ onClose }: Props) {
               Browse
             </button>
           </div>
+        </div>
+
+        <div className="divider" />
+
+        <h4 style={{ color: "var(--text-muted)", marginBottom: 12, fontSize: 10, letterSpacing: "0.8px", textTransform: "uppercase" }}>
+          Models
+        </h4>
+
+        <div className="field">
+          <label>Image model</label>
+          <select
+            value={String(form.preferred_model ?? "sdxl")}
+            onChange={(e) => setForm((f) => ({ ...f, preferred_model: e.target.value }))}
+            style={{ width: "100%", fontSize: 12 }}
+          >
+            <option value="sdxl">Stable Diffusion XL</option>
+            <option value="flux">FLUX.1</option>
+          </select>
+          <span className="field-hint">Base model for image generation and training.</span>
+        </div>
+
+        <div className="field">
+          <label>Video model</label>
+          <select
+            value={String(form.video_model ?? "wan2.1")}
+            onChange={(e) => setForm((f) => ({ ...f, video_model: e.target.value }))}
+            style={{ width: "100%", fontSize: 12 }}
+          >
+            <option value="wan2.1">Wan 2.1 (best quality)</option>
+            <option value="cogvideo">CogVideoX (lighter)</option>
+          </select>
+          <span className="field-hint">Model for image-to-video animation.</span>
         </div>
 
         <div className="flex justify-between mt-24">
