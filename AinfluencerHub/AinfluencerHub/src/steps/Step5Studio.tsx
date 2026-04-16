@@ -16,7 +16,6 @@ export function Step5Studio({ onAdvance }: Props) {
   const [videos,      setVideos]      = useState<GeneratedVideo[]>([]);
   const [prompt,      setPrompt]      = useState("");
   const [strength,    setStrength]    = useState(0.85);
-  const [checkpoint,  setCheckpoint]  = useState("zimage_turbo.safetensors");
   const [motionPrompt, setMotionPrompt] = useState("The person smiles gently and turns their head slightly.");
   const [selectedImg, setSelectedImg] = useState<GeneratedImage | null>(null);
   const [generating,  setGenerating]  = useState(false);
@@ -54,9 +53,9 @@ export function Step5Studio({ onAdvance }: Props) {
     if (!slug) return;
     setGenError("");
     setGenerating(true);
-    setGenStatus("Submitting to ComfyUI...");
+    setGenStatus("Starting generation...");
 
-    const es = api.generateImage(slug, prompt, strength, checkpoint);
+    const es = api.generateImage(slug, prompt, strength);
     genSourceRef.current = es;
     api.listenSSE(
       es,
@@ -80,7 +79,7 @@ export function Step5Studio({ onAdvance }: Props) {
     if (!selectedImg || !slug) return;
     setVidError("");
     setAnimating(true);
-    setVidStatus("Generating video...");
+    setVidStatus("Starting video generation...");
 
     const es = api.animateImage(slug, selectedImg.path, motionPrompt);
     vidSourceRef.current = es;
@@ -162,21 +161,11 @@ export function Step5Studio({ onAdvance }: Props) {
             <div
               style={{
                 display:     "grid",
-                gridTemplateColumns: "1fr 1fr auto",
+                gridTemplateColumns: "1fr auto",
                 gap:         10,
                 alignItems:  "end",
               }}
             >
-              <div className="field" style={{ margin: 0 }}>
-                <label>Checkpoint</label>
-                <input
-                  type="text"
-                  value={checkpoint}
-                  onChange={(e) => setCheckpoint(e.target.value)}
-                  style={{ fontSize: 12 }}
-                />
-              </div>
-
               <div className="field" style={{ margin: 0 }}>
                 <label>LoRA strength: {strength.toFixed(2)}</label>
                 <div className="slider-row" style={{ marginTop: 8 }}>
@@ -250,7 +239,7 @@ export function Step5Studio({ onAdvance }: Props) {
           >
             <h3 style={{ marginBottom: 6 }}>Animate to video</h3>
             <p className="text-xs text-muted">
-              Select an image on the left, describe the motion, then animate via ComfyUI.
+              Select an image on the left, describe the motion, then animate it.
             </p>
           </div>
 

@@ -3,6 +3,9 @@
  *
  * The backend URL is supplied by Tauri via `invoke("get_backend_url")`.
  * Falls back to localhost:8765 for dev convenience.
+ *
+ * All GPU operations (generation, training, captioning) run natively
+ * on the backend — no external services required.
  */
 
 import type {
@@ -10,8 +13,10 @@ import type {
   CaptionMap,
   GeneratedImage,
   GeneratedVideo,
+  ModelStatusMap,
   PreflightResult,
   Project,
+  StreamEvent,
 } from "./types";
 
 let _baseUrl = "http://localhost:8765";
@@ -87,12 +92,11 @@ export const uploadReferences = async (
 // ── Dataset ────────────────────────────────────────────────────────────────
 
 export const startDatasetGen = (
-  slug:       string,
-  count:      number,
-  checkpoint: string
+  slug:  string,
+  count: number,
 ): EventSource =>
   new EventSource(
-    `${_baseUrl}/api/dataset/${slug}/generate?count=${count}&checkpoint=${encodeURIComponent(checkpoint)}`
+    `${_baseUrl}/api/dataset/${slug}/generate?count=${count}`
   );
 
 export const uploadDatasetImages = async (
@@ -150,16 +154,14 @@ export const injectTrigger = (slug: string) =>
 // ── Training ───────────────────────────────────────────────────────────────
 
 export const startTraining = (
-  slug:            string,
-  ai_toolkit_path: string,
-  hf_token:        string,
-  steps:           number,
-  rank:            number,
-  learning_rate:   string
+  slug:          string,
+  hf_token:      string,
+  steps:         number,
+  rank:          number,
+  learning_rate: string
 ): EventSource =>
   new EventSource(
     `${_baseUrl}/api/training/${slug}/start?` +
-    `ai_toolkit_path=${encodeURIComponent(ai_toolkit_path)}&` +
     `hf_token=${encodeURIComponent(hf_token)}&` +
     `steps=${steps}&rank=${rank}&lr=${encodeURIComponent(learning_rate)}`
   );
@@ -167,9 +169,14 @@ export const startTraining = (
 export const cancelTraining = (slug: string) =>
   request<void>("POST", `/api/training/${slug}/cancel`);
 
-export const cloneAiToolkit = (dest: string): EventSource =>
+// ── Model management ──────────────────────────────────────────────────────
+
+export const getModelStatus = () =>
+  request<ModelStatusMap>("GET", "/api/models/status");
+
+export const downloadModel = (modelHfId: string): EventSource =>
   new EventSource(
-    `${_baseUrl}/api/toolkit/clone?dest=${encodeURIComponent(dest)}`
+    `${_baseUrl}/api/models/download?model_hf_id=${encodeURIComponent(modelHfId)}`
   );
 
 // ── Studio ─────────────────────────────────────────────────────────────────
@@ -178,13 +185,11 @@ export const generateImage = (
   slug:           string,
   prompt:         string,
   lora_strength:  number,
-  checkpoint:     string
 ): EventSource =>
   new EventSource(
     `${_baseUrl}/api/studio/${slug}/generate?` +
     `prompt=${encodeURIComponent(prompt)}&` +
-    `lora_strength=${lora_strength}&` +
-    `checkpoint=${encodeURIComponent(checkpoint)}`
+    `lora_strength=${lora_strength}`
   );
 
 export const animateImage = (
@@ -203,16 +208,6 @@ export const getGeneratedImages = (slug: string) =>
 
 export const getVideos = (slug: string) =>
   request<{ videos: GeneratedVideo[] }>("GET", `/api/studio/${slug}/videos`);
-
-// ── ComfyUI ────────────────────────────────────────────────────
-
-export const getCheckpoints = () =>
-  request<{ checkpoints: string[] }>("GET", "/api/comfyui/checkpoints");
-
-export const getComfyUIStatus = () =>
-  request<{ online: boolean; has_pulid: boolean; has_wan_video: boolean }>(
-    "GET", "/api/comfyui/status"
-  );
 
 // ── Settings ───────────────────────────────────────────────────────────────
 

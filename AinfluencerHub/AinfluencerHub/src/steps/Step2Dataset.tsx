@@ -15,8 +15,8 @@ type Method = "local" | "manual";
 const METHODS: { id: Method; title: string; desc: string }[] = [
   {
     id:    "local",
-    title: "Automatic — local generation",
-    desc:  "Uses PuLID-FLUX in ComfyUI to create varied poses from your reference photo. Free, runs on your GPU. Requires ComfyUI with PuLID-FLUX nodes.",
+    title: "Automatic — AI generation",
+    desc:  "Uses face-matching AI to create varied poses from your reference photo. Runs on your GPU — no external tools needed.",
   },
   {
     id:    "manual",
@@ -31,8 +31,6 @@ export function Step2Dataset({ onAdvance }: Props) {
   const [method,      setMethod]      = useState<Method>(
     settings?.dataset_method === "manual" ? "manual" : "local"
   );
-  const [checkpoint,  setCheckpoint]  = useState(settings?.dataset_checkpoint ?? "");
-  const [checkpoints, setCheckpoints] = useState<string[]>([]);
   const [count,       setCount]       = useState(25);
   const [images,      setImages]      = useState<{ path: string; filename: string }[]>([]);
   const [running,     setRunning]     = useState(false);
@@ -44,17 +42,13 @@ export function Step2Dataset({ onAdvance }: Props) {
   const fileRef    = useRef<HTMLInputElement>(null);
   const sourceRef  = useRef<EventSource | null>(null);
 
-  // Load dataset images and available checkpoints
+  // Load dataset images
   useEffect(() => {
     if (activeProject) {
       api.getDatasetImages(activeProject.slug).then(({ images: imgs }) => {
         setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })));
       }).catch(() => {});
     }
-    api.getCheckpoints().then(({ checkpoints: ckpts }) => {
-      setCheckpoints(ckpts);
-      if (!checkpoint && ckpts.length > 0) setCheckpoint(ckpts[0]);
-    }).catch(() => {});
     return () => { sourceRef.current?.close(); };
   }, [activeProject]);
 
@@ -65,15 +59,11 @@ export function Step2Dataset({ onAdvance }: Props) {
     if (method !== "local") {
       return;
     }
-    if (!checkpoint.trim()) {
-      setError("Select a checkpoint first. Make sure ComfyUI is running.");
-      return;
-    }
 
     setRunning(true);
     setProgress({ done: 0, total: count, message: "Starting..." });
 
-    const es = api.startDatasetGen(activeProject.slug, count, checkpoint.trim());
+    const es = api.startDatasetGen(activeProject.slug, count);
 
     sourceRef.current = es;
     api.listenSSE(
@@ -164,25 +154,7 @@ export function Step2Dataset({ onAdvance }: Props) {
           {/* Method-specific config */}
           {method === "local" && (
             <div className="card mb-20">
-              <div className="card-title mb-16">ComfyUI generation</div>
-              <div className="field">
-                <label>Checkpoint</label>
-                <select
-                  value={checkpoint}
-                  onChange={(e) => setCheckpoint(e.target.value)}
-                  style={{ width: "100%", fontSize: 12 }}
-                >
-                  {checkpoints.length === 0 && (
-                    <option value="">No checkpoints found — is ComfyUI running?</option>
-                  )}
-                  {checkpoints.map((c) => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
-                <span className="field-hint">
-                  Select any FLUX-compatible checkpoint from your ComfyUI models folder
-                </span>
-              </div>
+              <div className="card-title mb-16">AI-powered generation</div>
               <div className="field">
                 <label>Images to generate: {count}</label>
                 <div className="slider-row">
@@ -194,6 +166,9 @@ export function Step2Dataset({ onAdvance }: Props) {
                   />
                   <span className="slider-value">{count} images</span>
                 </div>
+                <span className="field-hint">
+                  Face-consistent images will be generated from your reference photo using your GPU.
+                </span>
               </div>
             </div>
           )}

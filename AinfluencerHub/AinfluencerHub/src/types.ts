@@ -15,15 +15,14 @@ export interface Project {
 // ── Settings ──────────────────────────────────────────────────────────────
 
 export interface AppSettings {
-  comfyui_url:         string;
   hf_token:            string;
-  ai_toolkit_path:     string;
   output_dir:          string;
   dataset_method:      "local" | "manual";
-  dataset_checkpoint:  string;
   training_steps:      number;
   lora_rank:           number;
   learning_rate:       string;
+  preferred_model:     string;
+  video_model:         string;
   theme:               "dark";
   last_project:        string;
   setup_complete:      boolean;
@@ -37,12 +36,23 @@ export interface PreflightItem {
 }
 
 export interface PreflightResult {
-  comfyui:         PreflightItem;
-  pulid_nodes:     PreflightItem;
-  wan_video_nodes: PreflightItem;
-  ai_toolkit:      PreflightItem;
-  hf_token:        PreflightItem;
+  gpu:            PreflightItem;
+  ml_libraries:   PreflightItem;
+  models:         PreflightItem;
+  hf_token:       PreflightItem;
 }
+
+// ── Model status ──────────────────────────────────────────────────────────
+
+export interface ModelStatus {
+  hf_id:    string;
+  size_gb:  number;
+  purpose:  string;
+  required: boolean;
+  cached:   boolean;
+}
+
+export type ModelStatusMap = Record<string, ModelStatus>;
 
 // ── API responses ─────────────────────────────────────────────────────────
 

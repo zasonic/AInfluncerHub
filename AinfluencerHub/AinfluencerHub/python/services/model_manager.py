@@ -1,0 +1,151 @@
+"""
+services/model_manager.py — Centralized model download and cache management.
+
+Tracks which HuggingFace models are required, checks download status,
+and provides download-with-progress for the UI.  All models use the
+standard HuggingFace Hub cache (~/.cache/huggingface/).
+"""
+
+import logging
+from pathlib import Path
+from typing import Callable
+
+log = logging.getLogger("hub.models")
+
+# ── Model manifest ───────────────────────────────────────────────────────────
+
+MODEL_MANIFEST: dict[str, dict] = {
+    "base_model": {
+        "hf_id":    "stabilityai/stable-diffusion-xl-base-1.0",
+        "size_gb":  6.5,
+        "purpose":  "Image generation base model (Steps 2 & 5)",
+        "required": True,
+    },
+    "ip_adapter": {
+        "hf_id":    "h94/IP-Adapter",
+        "size_gb":  1.8,
+        "purpose":  "Face-consistent dataset generation (Step 2)",
+        "required": True,
+    },
+    "captioner_florence2": {
+        "hf_id":    "microsoft/Florence-2-large",
+        "size_gb":  4.0,
+        "purpose":  "Image captioning (Step 3)",
+        "required": True,
+    },
+    "captioner_joycaption": {
+        "hf_id":    "fancyfeast/llama-joycaption-beta-one-hf-llava",
+        "size_gb":  10.0,
+        "purpose":  "Advanced captioning for training (Step 3)",
+        "required": False,
+    },
+    "training_base": {
+        "hf_id":    "stabilityai/stable-diffusion-xl-base-1.0",
+        "size_gb":  6.5,
+        "purpose":  "LoRA training base model (Step 4)",
+        "required": True,
+    },
+    "video_wan": {
+        "hf_id":    "Wan-AI/Wan2.1-T2V-14B-Diffusers",
+        "size_gb":  28.0,
+        "purpose":  "Image-to-video animation (Step 5)",
+        "required": False,
+    },
+}
+
+
+def check_model_cached(hf_id: str) -> bool:
+    """Check if a HuggingFace model is already cached locally."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        from huggingface_hub.utils import LocalEntryNotFoundError
+
+        # Check for the config file — if present, model is cached
+        result = try_to_load_from_cache(hf_id, "config.json")
+        if result is not None and isinstance(result, (str, Path)):
+            return True
+
+        # Some models use model_index.json (diffusers pipelines)
+        result = try_to_load_from_cache(hf_id, "model_index.json")
+        if result is not None and isinstance(result, (str, Path)):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
+def get_all_model_status() -> dict[str, dict]:
+    """Return status of all models in the manifest."""
+    status = {}
+    for key, info in MODEL_MANIFEST.items():
+        cached = check_model_cached(info["hf_id"])
+        status[key] = {
+            "hf_id":    info["hf_id"],
+            "size_gb":  info["size_gb"],
+            "purpose":  info["purpose"],
+            "required": info["required"],
+            "cached":   cached,
+        }
+    return status
+
+
+def check_gpu() -> dict:
+    """Check GPU availability and VRAM."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return {
+                "ok":       False,
+                "detail":   "No CUDA GPU detected",
+                "vram_gb":  0,
+                "device":   "cpu",
+            }
+
+        device = torch.cuda.get_device_name(0)
+        vram = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+        return {
+            "ok":       True,
+            "detail":   f"{device} ({vram:.1f} GB VRAM)",
+            "vram_gb":  round(vram, 1),
+            "device":   device,
+        }
+    except Exception as exc:
+        return {
+            "ok":       False,
+            "detail":   f"GPU check failed: {str(exc)[:80]}",
+            "vram_gb":  0,
+            "device":   "unknown",
+        }
+
+
+def download_model(
+    hf_id: str,
+    hf_token: str = "",
+    progress_cb: Callable[[str], None] | None = None,
+) -> tuple[bool, str]:
+    """
+    Download a model from HuggingFace Hub.
+    Returns (success, message).
+    """
+    try:
+        from huggingface_hub import snapshot_download
+
+        if progress_cb:
+            progress_cb(f"Downloading {hf_id}...")
+
+        kwargs: dict = {}
+        if hf_token:
+            kwargs["token"] = hf_token
+
+        snapshot_download(hf_id, **kwargs)
+
+        if progress_cb:
+            progress_cb(f"Downloaded {hf_id} successfully.")
+        return True, f"Model {hf_id} downloaded."
+
+    except Exception as exc:
+        msg = f"Download failed for {hf_id}: {str(exc)[:200]}"
+        log.error(msg)
+        return False, msg

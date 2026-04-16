@@ -4,6 +4,10 @@ python/server.py — AinfluencerHub FastAPI backend.
 Launched by Tauri (Rust) before the WebView opens.
 All long-running operations stream progress via Server-Sent Events.
 
+This backend is fully self-contained — all GPU inference, training,
+and captioning runs natively using HuggingFace diffusers, peft,
+and transformers.  No external services (ComfyUI, ai-toolkit) required.
+
 Usage:
     python server.py --port 8765
 """
@@ -53,7 +57,7 @@ _cancel_events: dict[str, threading.Event] = {}
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
-app = FastAPI(title="AinfluencerHub", version="1.0.0")
+app = FastAPI(title="AinfluencerHub", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins  = ["*"],
@@ -164,16 +168,14 @@ async def upload_dataset(slug: str, files: list[UploadFile] = File(...)):
 
 @app.get("/api/dataset/{slug}/generate")
 async def generate_dataset_images(
-    slug:       str,
-    count:      int = Query(25),
-    checkpoint: str = Query(""),
+    slug:  str,
+    count: int = Query(25),
 ):
+    """Generate face-consistent dataset images using native diffusers pipeline."""
     proj = _load_project(slug)
     refs = proj.reference_images()
     if not refs:
         raise HTTPException(400, "No reference images found for this influencer.")
-    if not checkpoint.strip():
-        raise HTTPException(400, "Select a checkpoint in ComfyUI first.")
 
     gender      = proj.gender
     prompt_file = ROOT / "assets" / "prompts" / (
@@ -190,17 +192,14 @@ async def generate_dataset_images(
 
     def _run():
         try:
-            from services.comfyui_client import ComfyUIClient
-            client = ComfyUIClient(settings.get("comfyui_url"))
-            if not client.ping():
-                q.put({"type": "error", "message": "ComfyUI is not running. Start it first."})
-                return
-            client.generate_dataset(
+            from services.diffusion_pipeline import generate_dataset
+            hf_token = settings.get("hf_token", "")
+            generate_dataset(
                 reference_image=refs[0],
                 prompts=prompts,
                 trigger_word=proj.trigger_word,
-                checkpoint=checkpoint,
                 output_dir=proj.dataset_dir,
+                hf_token=hf_token,
                 progress_cb=lambda done, total, msg: q.put(
                     {"type": "progress", "done": done, "total": total, "message": msg}
                 ),
@@ -321,16 +320,14 @@ async def run_captioning(
 
 @app.get("/api/training/{slug}/start")
 async def start_training(
-    slug:            str,
-    ai_toolkit_path: str   = Query(""),
-    hf_token:        str   = Query(""),
-    steps:           int   = Query(2000),
-    rank:            int   = Query(16),
-    lr:              str   = Query("1e-4"),
+    slug:     str,
+    hf_token: str = Query(""),
+    steps:    int = Query(2000),
+    rank:     int = Query(16),
+    lr:       str = Query("1e-4"),
 ):
+    """Start native LoRA training using diffusers + peft."""
     proj = _load_project(slug)
-    if not ai_toolkit_path.strip():
-        raise HTTPException(400, "ai_toolkit_path is required.")
     if not hf_token.strip():
         raise HTTPException(400, "hf_token is required.")
     if not _gpu_lock.acquire(blocking=False):
@@ -343,7 +340,6 @@ async def start_training(
 
     # Save settings for next time
     settings.update({
-        "ai_toolkit_path": ai_toolkit_path,
         "hf_token":        hf_token,
         "training_steps":  steps,
         "lora_rank":       rank,
@@ -352,38 +348,22 @@ async def start_training(
 
     def _run():
         try:
-            import yaml
-            from services.lora_trainer import (
-                build_yaml_config,
-                prepare_training_folder,
-                run_training,
-            )
+            from services.lora_trainer import prepare_training_folder, run_training
 
             prepare_training_folder(proj.dataset_dir, proj.captions_dir)
 
-            config_dict = build_yaml_config(
-                project_name=f"{proj.slug}_lora_v1",
-                trigger_word=proj.trigger_word,
-                dataset_dir=proj.dataset_dir,
-                captions_dir=proj.captions_dir,
-                output_dir=proj.lora_dir,
-                steps=steps,
-                rank=rank,
-                learning_rate=lr,
-                hf_token=hf_token,
-            )
-            config_path = proj.root / "training_config.yaml"
-            with open(config_path, "w") as f:
-                yaml.dump(config_dict, f, default_flow_style=False)
-
-            q.put({"type": "log", "line": f"Config written: {config_path}"})
+            q.put({"type": "log", "line": f"Starting training: {steps} steps, rank {rank}, lr {lr}"})
 
             success, message = run_training(
-                ai_toolkit_path=Path(ai_toolkit_path),
-                config_path=config_path,
+                dataset_dir=proj.dataset_dir,
+                output_dir=proj.lora_dir,
+                trigger_word=proj.trigger_word,
+                steps=steps,
+                rank=rank,
+                learning_rate=float(lr),
+                hf_token=hf_token,
                 log_cb=lambda line: q.put({"type": "log", "line": line}),
                 cancel_event=cancel,
-                hf_token=hf_token,
             )
 
             if success:
@@ -392,13 +372,15 @@ async def start_training(
                     key=lambda p: p.stat().st_mtime,
                     reverse=True,
                 )
-                lora_path = str(loras[0]) if loras else ""
+                lora_path = str(loras[0]) if loras else message
                 proj.set("lora_path", lora_path)
                 proj.mark_step_done(4)
                 proj.save()
                 q.put({"type": "done", "message": "Training complete.", "payload": {"path": lora_path}})
             else:
                 q.put({"type": "error", "message": message})
+        except Exception as exc:
+            q.put({"type": "error", "message": str(exc)})
         finally:
             _gpu_lock.release()
 
@@ -414,23 +396,33 @@ def cancel_training(slug: str):
         ev.set()
     return {"ok": True}
 
-# ── Toolkit clone ─────────────────────────────────────────────────────────────
+# ── Model management ─────────────────────────────────────────────────────────
 
-@app.get("/api/toolkit/clone")
-async def clone_toolkit(dest: str = Query("")):
-    if not dest:
-        dest = str(Path.home() / "ai_tools" / "ai-toolkit")
+@app.get("/api/models/status")
+def get_model_status():
+    """Report which models are downloaded and their sizes."""
+    from services.model_manager import get_all_model_status
+    return get_all_model_status()
+
+
+@app.get("/api/models/download")
+async def download_model(model_hf_id: str = Query("")):
+    """Download a model from HuggingFace Hub with SSE progress."""
+    if not model_hf_id.strip():
+        raise HTTPException(400, "model_hf_id is required.")
 
     q = queue.Queue()
 
     def _run():
-        from services.preflight import clone_ai_toolkit
-        ok, msg = clone_ai_toolkit(
-            Path(dest),
+        from services.model_manager import download_model as _download
+        hf_token = settings.get("hf_token", "")
+        ok, msg = _download(
+            model_hf_id.strip(),
+            hf_token=hf_token,
             progress_cb=lambda m: q.put({"type": "log", "line": m}),
         )
         if ok:
-            q.put({"type": "done", "message": "Installed.", "payload": {"path": dest}})
+            q.put({"type": "done", "message": msg})
         else:
             q.put({"type": "error", "message": msg})
 
@@ -444,8 +436,8 @@ async def generate_image(
     slug:          str,
     prompt:        str   = Query(""),
     lora_strength: float = Query(0.85),
-    checkpoint:    str   = Query("zimage_turbo.safetensors"),
 ):
+    """Generate an image using native diffusers pipeline with optional LoRA."""
     proj = _load_project(slug)
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
@@ -455,18 +447,15 @@ async def generate_image(
     def _run():
         try:
             lora = proj.lora_path()
-            from services.comfyui_client import ComfyUIClient
-            client = ComfyUIClient(settings.get("comfyui_url"))
-            if not client.ping():
-                q.put({"type": "error", "message": "ComfyUI is not running. Start it in Pinokio."})
-                return
-            q.put({"type": "progress", "done": 0, "total": 1, "message": "Submitting to ComfyUI..."})
-            paths = client.generate(
+            from services.diffusion_pipeline import generate_image as _generate
+            hf_token = settings.get("hf_token", "")
+            q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting generation..."})
+            paths = _generate(
                 positive_prompt=prompt,
                 lora_path=str(lora) if lora else "",
                 lora_strength=lora_strength,
                 output_dir=proj.generated_dir,
-                checkpoint=checkpoint,
+                hf_token=hf_token,
                 progress_cb=lambda msg: q.put(
                     {"type": "progress", "done": 0, "total": 1, "message": msg}
                 ),
@@ -509,6 +498,7 @@ async def animate_image(
     image_path:    str = Query(""),
     motion_prompt: str = Query(""),
 ):
+    """Generate a video from a still image using native diffusers pipeline."""
     proj = _load_project(slug)
     if not image_path:
         raise HTTPException(400, "image_path is required.")
@@ -519,16 +509,14 @@ async def animate_image(
 
     def _run():
         try:
-            from services.comfyui_client import ComfyUIClient
-            client = ComfyUIClient(settings.get("comfyui_url"))
-            if not client.ping():
-                q.put({"type": "error", "message": "ComfyUI is not running. Start it first."})
-                return
-            q.put({"type": "progress", "done": 0, "total": 1, "message": "Submitting video job to ComfyUI..."})
-            video = client.generate_video(
+            from services.video_pipeline import generate_video
+            hf_token = settings.get("hf_token", "")
+            q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting video generation..."})
+            video = generate_video(
                 image_path=Path(image_path),
                 prompt=motion_prompt,
                 output_dir=proj.videos_dir,
+                hf_token=hf_token,
                 progress_cb=lambda m: q.put(
                     {"type": "progress", "done": 0, "total": 1, "message": m}
                 ),
@@ -554,25 +542,6 @@ def get_videos(slug: str):
     )
     return {
         "videos": [{"path": str(v), "filename": v.name} for v in vids]
-    }
-
-# ── ComfyUI info ─────────────────────────────────────────────────────────
-
-@app.get("/api/comfyui/checkpoints")
-def list_comfyui_checkpoints():
-    from services.comfyui_client import ComfyUIClient
-    client = ComfyUIClient(settings.get("comfyui_url"))
-    return {"checkpoints": client.list_checkpoints()}
-
-
-@app.get("/api/comfyui/status")
-def comfyui_status():
-    from services.comfyui_client import ComfyUIClient
-    client = ComfyUIClient(settings.get("comfyui_url"))
-    return {
-        "online":          client.ping(),
-        "has_pulid":       client.check_custom_nodes("pulid"),
-        "has_wan_video":   client.check_custom_nodes("wan_video"),
     }
 
 # ── Settings ──────────────────────────────────────────────────────────────────
