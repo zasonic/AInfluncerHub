@@ -71,6 +71,30 @@ def check_hf_token(token: str) -> dict:
     return {"ok": False, "detail": "No token — needed for model downloads"}
 
 
+def check_disk_space(output_dir: str = "") -> dict:
+    """Check that enough disk space is available for models and training output."""
+    import shutil
+    try:
+        path = output_dir if output_dir else "."
+        usage = shutil.disk_usage(path)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < 5:
+            return {
+                "ok": False,
+                "detail": f"Only {free_gb:.1f} GB free. Training and models need at least 10 GB.",
+                "free_gb": round(free_gb, 1),
+            }
+        if free_gb < 15:
+            return {
+                "ok": True,
+                "detail": f"{free_gb:.1f} GB free. Consider freeing space — models can use 10-30 GB.",
+                "free_gb": round(free_gb, 1),
+            }
+        return {"ok": True, "detail": f"{free_gb:.1f} GB free", "free_gb": round(free_gb, 1)}
+    except Exception as exc:
+        return {"ok": True, "detail": f"Could not check disk space ({_short(exc)})"}
+
+
 def run_all(settings) -> dict[str, dict]:
     """Run every check and return a combined status dict."""
     return {
@@ -78,6 +102,7 @@ def run_all(settings) -> dict[str, dict]:
         "ml_libraries": check_ml_libraries(),
         "models":       check_models(),
         "hf_token":     check_hf_token(settings.get("hf_token")),
+        "disk_space":   check_disk_space(settings.get("output_dir", "")),
     }
 
 

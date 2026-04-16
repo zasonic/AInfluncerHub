@@ -177,6 +177,11 @@ export function Step5Studio({ onAdvance }: Props) {
                   />
                   <span className="slider-value">{strength.toFixed(2)}</span>
                 </div>
+                {strength > 1.0 && (
+                  <span className="text-xs" style={{ color: "var(--warning)", marginTop: 4, display: "block" }}>
+                    Values above 1.0 may cause visual artifacts. Try 0.7–0.9 for best results.
+                  </span>
+                )}
               </div>
 
               <button

@@ -21,9 +21,13 @@ export function Step4Training({ onAdvance }: Props) {
   const [statusOk,  setStatusOk]  = useState(true);
   const [done,      setDone]      = useState(false);
   const [error,     setError]     = useState("");
+  const [eta,       setEta]       = useState("");
+  const [vramWarn,  setVramWarn]  = useState("");
 
   const sourceRef  = useRef<EventSource | null>(null);
   const logRef     = useRef<HTMLDivElement>(null);
+  const stepTimes  = useRef<number[]>([]);
+  const lastStep   = useRef<{ step: number; time: number } | null>(null);
   const slug       = activeProject?.slug ?? "";
 
   // Check if already trained
@@ -47,6 +51,21 @@ export function Step4Training({ onAdvance }: Props) {
     return null;
   };
 
+  // Check VRAM on mount
+  useEffect(() => {
+    api.getPreflight().then((result: Record<string, { ok: boolean; detail?: string }>) => {
+      const gpu = result?.gpu;
+      if (gpu && !gpu.ok) {
+        setVramWarn("No GPU detected. Training will be extremely slow on CPU.");
+      } else if (gpu?.detail) {
+        const vramMatch = gpu.detail.match(/([\d.]+)\s*GB/i);
+        if (vramMatch && parseFloat(vramMatch[1]) < 8) {
+          setVramWarn(`Low VRAM (${vramMatch[1]} GB). Training may fail or be very slow. 8+ GB recommended.`);
+        }
+      }
+    }).catch(() => {});
+  }, []);
+
   const startTraining = () => {
     const err = validate();
     if (err) { setError(err); return; }
@@ -54,6 +73,9 @@ export function Step4Training({ onAdvance }: Props) {
     setRunning(true);
     setDone(false);
     setProgress(0);
+    setEta("");
+    stepTimes.current = [];
+    lastStep.current = null;
     setLogLines([]);
     addLog(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`);
 
@@ -72,8 +94,32 @@ export function Step4Training({ onAdvance }: Props) {
           // Parse step progress from log line e.g. "step: 120/2000"
           const m = text.match(/(\d+)\s*\/\s*(\d+)/);
           if (m) {
-            const pct = Number(m[1]) / Number(m[2]);
+            const current = Number(m[1]);
+            const total = Number(m[2]);
+            const pct = current / total;
             if (pct >= 0 && pct <= 1) setProgress(pct);
+
+            // ETA calculation from step timings
+            const now = Date.now();
+            if (lastStep.current && current > lastStep.current.step) {
+              const elapsed = (now - lastStep.current.time) / 1000;
+              const stepsCompleted = current - lastStep.current.step;
+              stepTimes.current.push(elapsed / stepsCompleted);
+              if (stepTimes.current.length > 20) stepTimes.current.shift();
+            }
+            lastStep.current = { step: current, time: now };
+
+            if (stepTimes.current.length >= 2) {
+              const avgSecPerStep = stepTimes.current.reduce((a, b) => a + b, 0) / stepTimes.current.length;
+              const remaining = (total - current) * avgSecPerStep;
+              if (remaining > 3600) {
+                setEta(`~${(remaining / 3600).toFixed(1)}h remaining`);
+              } else if (remaining > 60) {
+                setEta(`~${Math.round(remaining / 60)}m remaining`);
+              } else {
+                setEta(`~${Math.round(remaining)}s remaining`);
+              }
+            }
           }
         } else if (event.type === "done") {
           setRunning(false);
@@ -253,6 +299,11 @@ export function Step4Training({ onAdvance }: Props) {
               </div>
             )}
             {error && <div className="alert alert-error">{error}</div>}
+            {vramWarn && !running && !done && (
+              <div className="alert alert-warning" style={{ padding: "8px 12px", fontSize: 12 }}>
+                {vramWarn}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -262,7 +313,7 @@ export function Step4Training({ onAdvance }: Props) {
           <span className="text-sm text-muted">Step 4 of 5</span>
           {running && (
             <span className="text-xs text-muted">
-              {Math.round(progress * 100)}% complete
+              {Math.round(progress * 100)}% complete{eta ? ` — ${eta}` : ""}
             </span>
           )}
         </div>

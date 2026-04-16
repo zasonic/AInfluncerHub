@@ -44,13 +44,46 @@ def unload_models() -> None:
     log.info("Quality scoring models unloaded.")
 
 
+def _explain_face(score: float) -> str:
+    if score >= 0.7:
+        return "Excellent face clarity and detail"
+    if score >= FACE_THRESHOLD:
+        return "Acceptable face quality"
+    if score >= 0.2:
+        return "Low face quality — may be blurry, poorly lit, or partially occluded"
+    return "Very low face quality — face may not be detectable"
+
+
+def _explain_aesthetic(score: float) -> str:
+    if score >= 7.0:
+        return "Excellent composition and lighting"
+    if score >= AESTHETIC_THRESHOLD:
+        return "Acceptable image quality"
+    if score >= 3.0:
+        return "Below average — consider better lighting or composition"
+    return "Poor image quality — likely to hurt training results"
+
+
+def _overall_tip(face: float, aesthetic: float) -> str:
+    tips = []
+    if face < FACE_THRESHOLD:
+        tips.append("Try a clearer, well-lit photo where the face is fully visible")
+    if aesthetic < AESTHETIC_THRESHOLD:
+        tips.append("Use a photo with better lighting and less visual clutter")
+    if not tips:
+        return "Good to use for training"
+    return ". ".join(tips) + "."
+
+
 def score_images(
     image_paths: list[Path],
     progress_cb=None,
 ) -> list[dict]:
     """Score images for face quality and aesthetics.
 
-    Returns list of dicts: {path, face_score, aesthetic_score, passed}
+    Returns list of dicts with human-readable explanations:
+    {path, face_score, aesthetic_score, passed, face_explanation,
+     aesthetic_explanation, tip}
     """
     if _face_metric is None:
         load_models()
@@ -67,12 +100,16 @@ def score_images(
             face_score = 0.0
             aesthetic_score = 0.0
 
+        passed = face_score >= FACE_THRESHOLD and aesthetic_score >= AESTHETIC_THRESHOLD
         results.append({
             "path": str(img_path),
             "filename": img_path.name,
             "face_score": round(face_score, 3),
             "aesthetic_score": round(aesthetic_score, 3),
-            "passed": face_score >= FACE_THRESHOLD and aesthetic_score >= AESTHETIC_THRESHOLD,
+            "passed": passed,
+            "face_explanation": _explain_face(face_score),
+            "aesthetic_explanation": _explain_aesthetic(aesthetic_score),
+            "tip": _overall_tip(face_score, aesthetic_score),
         })
 
         if progress_cb:
