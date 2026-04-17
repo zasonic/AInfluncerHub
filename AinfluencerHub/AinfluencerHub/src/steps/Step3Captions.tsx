@@ -23,7 +23,7 @@ export function Step3Captions({ onAdvance }: Props) {
   const [error,       setError]       = useState("");
   const [captioner,   setCaptioner]   = useState<"florence2" | "joycaption">("florence2");
 
-  const sourceRef = useRef<EventSource | null>(null);
+  const handleRef = useRef<api.SSEHandle | null>(null);
   const slug      = activeProject?.slug ?? "";
 
   useEffect(() => {
@@ -33,7 +33,7 @@ export function Step3Captions({ onAdvance }: Props) {
         setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })))
       ).catch(() => {});
     api.getCaptions(slug).then(setCaptions).catch(() => {});
-    return () => sourceRef.current?.close();
+    return () => { handleRef.current?.abort(); };
   }, [slug]);
 
   const selectImage = (img: { path: string; filename: string }) => {
@@ -64,10 +64,10 @@ export function Step3Captions({ onAdvance }: Props) {
     const modelLabel = captioner === "joycaption" ? "JoyCaption" : "Florence2";
     setProgress({ done: 0, total: images.length, message: `Loading ${modelLabel}...` });
 
-    const es = api.startCaptioning(slug, hf_token, captioner);
-    sourceRef.current = es;
-    api.listenSSE(
-      es,
+    const handle = api.startCaptioning(
+      slug,
+      hf_token,
+      captioner,
       (event: StreamEvent) => {
         if (event.type === "progress") {
           setProgress({ done: event.done, total: event.total, message: event.message });
@@ -87,8 +87,16 @@ export function Step3Captions({ onAdvance }: Props) {
           setRunning(false);
         }
       },
-      () => setRunning(false)
+      () => setRunning(false),
     );
+    handleRef.current = handle;
+  };
+
+  const cancelCaptioning = () => {
+    api.cancelCaptioning(slug).catch(() => {});
+    handleRef.current?.abort();
+    handleRef.current = null;
+    setRunning(false);
   };
 
   const injectTrigger = async () => {
@@ -151,6 +159,13 @@ export function Step3Captions({ onAdvance }: Props) {
               }}
             />
           </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={cancelCaptioning}
+            style={{ marginTop: 6 }}
+          >
+            Cancel
+          </button>
         </div>
       )}
 

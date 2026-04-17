@@ -166,11 +166,12 @@ async def upload_dataset(slug: str, files: list[UploadFile] = File(...)):
     return {"count": count}
 
 
-@app.get("/api/dataset/{slug}/generate")
-async def generate_dataset_images(
-    slug:  str,
-    count: int = Query(25),
-):
+class DatasetGenBody(BaseModel):
+    count: int = 25
+
+
+@app.post("/api/dataset/{slug}/generate")
+async def generate_dataset_images(slug: str, body: DatasetGenBody):
     """Generate face-consistent dataset images using native diffusers pipeline."""
     proj = _load_project(slug)
     refs = proj.reference_images()
@@ -183,7 +184,7 @@ async def generate_dataset_images(
     )
     with open(prompt_file) as f:
         all_prompts = json.load(f)
-    prompts = [p["prompt"] for p in all_prompts[:count]]
+    prompts = [p["prompt"] for p in all_prompts[:body.count]]
 
     q      = queue.Queue()
     cancel = threading.Event()
@@ -195,7 +196,7 @@ async def generate_dataset_images(
             from services.diffusion_pipeline import generate_dataset
             hf_token = settings.get("hf_token", "")
             generate_dataset(
-                reference_image=refs[0],
+                reference_images=refs,
                 prompts=prompts,
                 trigger_word=proj.trigger_word,
                 output_dir=proj.dataset_dir,
@@ -213,6 +214,15 @@ async def generate_dataset_images(
 
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
+
+
+@app.post("/api/dataset/{slug}/cancel")
+def cancel_dataset_gen(slug: str):
+    with _cancel_lock:
+        ev = _cancel_events.get(slug)
+    if ev:
+        ev.set()
+    return {"ok": True}
 
 
 @app.post("/api/dataset/{slug}/score")
@@ -272,12 +282,13 @@ def inject_trigger(slug: str):
     return {"updated": changed}
 
 
-@app.get("/api/captions/{slug}/run")
-async def run_captioning(
-    slug:     str,
-    hf_token: str = Query(""),
-    captioner: str = Query("florence2"),
-):
+class CaptionRunBody(BaseModel):
+    hf_token:  str = ""
+    captioner: str = "florence2"
+
+
+@app.post("/api/captions/{slug}/run")
+async def run_captioning(slug: str, body: CaptionRunBody):
     proj   = _load_project(slug)
     images = proj.dataset_images()
     if not images:
@@ -290,6 +301,8 @@ async def run_captioning(
     cancel = threading.Event()
     with _cancel_lock:
         _cancel_events[slug] = cancel
+    captioner = body.captioner
+    hf_token  = body.hf_token
 
     def _run():
         try:
@@ -316,22 +329,37 @@ async def run_captioning(
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
 
+@app.post("/api/captions/{slug}/cancel")
+def cancel_captioning(slug: str):
+    with _cancel_lock:
+        ev = _cancel_events.get(slug)
+    if ev:
+        ev.set()
+    return {"ok": True}
+
+
 # ── Training ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/training/{slug}/start")
-async def start_training(
-    slug:     str,
-    hf_token: str = Query(""),
-    steps:    int = Query(2000),
-    rank:     int = Query(16),
-    lr:       str = Query("1e-4"),
-):
+class TrainingBody(BaseModel):
+    hf_token:      str
+    steps:         int = 2000
+    rank:          int = 16
+    learning_rate: str = "1e-4"
+
+
+@app.post("/api/training/{slug}/start")
+async def start_training(slug: str, body: TrainingBody):
     """Start native LoRA training using diffusers + peft."""
     proj = _load_project(slug)
-    if not hf_token.strip():
+    if not body.hf_token.strip():
         raise HTTPException(400, "hf_token is required.")
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy. Wait for the current task to finish.")
+
+    hf_token = body.hf_token
+    steps    = body.steps
+    rank     = body.rank
+    lr       = body.learning_rate
 
     q      = queue.Queue()
     cancel = threading.Event()
@@ -431,12 +459,13 @@ async def download_model(model_hf_id: str = Query("")):
 
 # ── Studio — image generation ─────────────────────────────────────────────────
 
-@app.get("/api/studio/{slug}/generate")
-async def generate_image(
-    slug:          str,
-    prompt:        str   = Query(""),
-    lora_strength: float = Query(0.85),
-):
+class StudioGenBody(BaseModel):
+    prompt:        str   = ""
+    lora_strength: float = 0.85
+
+
+@app.post("/api/studio/{slug}/generate")
+async def generate_image(slug: str, body: StudioGenBody):
     """Generate an image using native diffusers pipeline with optional LoRA."""
     proj = _load_project(slug)
     if not _gpu_lock.acquire(blocking=False):
@@ -451,9 +480,9 @@ async def generate_image(
             hf_token = settings.get("hf_token", "")
             q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting generation..."})
             paths = _generate(
-                positive_prompt=prompt,
+                positive_prompt=body.prompt,
                 lora_path=str(lora) if lora else "",
-                lora_strength=lora_strength,
+                lora_strength=body.lora_strength,
                 output_dir=proj.generated_dir,
                 hf_token=hf_token,
                 progress_cb=lambda msg: q.put(
@@ -492,15 +521,16 @@ def get_generated_images(slug: str):
 
 # ── Studio — video ────────────────────────────────────────────────────────────
 
-@app.get("/api/studio/{slug}/animate")
-async def animate_image(
-    slug:          str,
-    image_path:    str = Query(""),
-    motion_prompt: str = Query(""),
-):
+class AnimateBody(BaseModel):
+    image_path:    str = ""
+    motion_prompt: str = ""
+
+
+@app.post("/api/studio/{slug}/animate")
+async def animate_image(slug: str, body: AnimateBody):
     """Generate a video from a still image using native diffusers pipeline."""
     proj = _load_project(slug)
-    if not image_path:
+    if not body.image_path:
         raise HTTPException(400, "image_path is required.")
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
@@ -513,8 +543,8 @@ async def animate_image(
             hf_token = settings.get("hf_token", "")
             q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting video generation..."})
             video = generate_video(
-                image_path=Path(image_path),
-                prompt=motion_prompt,
+                image_path=Path(body.image_path),
+                prompt=body.motion_prompt,
                 output_dir=proj.videos_dir,
                 hf_token=hf_token,
                 progress_cb=lambda m: q.put(
@@ -562,7 +592,7 @@ def update_settings(body: dict):
 def serve_image(path: str = Query(...)):
     p = Path(path).resolve()
     output_dir = settings.resolve_output_dir().resolve()
-    if not str(p).startswith(str(output_dir) + os.sep) and p != output_dir:
+    if not p.is_relative_to(output_dir):
         raise HTTPException(403, "Access denied.")
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "Image not found.")

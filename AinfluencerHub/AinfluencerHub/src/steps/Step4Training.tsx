@@ -22,7 +22,7 @@ export function Step4Training({ onAdvance }: Props) {
   const [done,      setDone]      = useState(false);
   const [error,     setError]     = useState("");
 
-  const sourceRef  = useRef<EventSource | null>(null);
+  const handleRef  = useRef<api.SSEHandle | null>(null);
   const logRef     = useRef<HTMLDivElement>(null);
   const slug       = activeProject?.slug ?? "";
 
@@ -57,10 +57,8 @@ export function Step4Training({ onAdvance }: Props) {
     setLogLines([]);
     addLog(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`);
 
-    const es = api.startTraining(slug, hfToken.trim(), steps, rank, lr);
-    sourceRef.current = es;
-    api.listenSSE(
-      es,
+    const handle = api.startTraining(
+      slug, hfToken.trim(), steps, rank, lr,
       (event: StreamEvent) => {
         if (event.type === "log") {
           const text = event.line;
@@ -69,7 +67,6 @@ export function Step4Training({ onAdvance }: Props) {
             : "normal";
           addLog(text, type);
 
-          // Parse step progress from log line e.g. "step: 120/2000"
           const m = text.match(/(\d+)\s*\/\s*(\d+)/);
           if (m) {
             const pct = Number(m[1]) / Number(m[2]);
@@ -92,13 +89,15 @@ export function Step4Training({ onAdvance }: Props) {
       },
       () => {
         if (!done) setRunning(false);
-      }
+      },
     );
+    handleRef.current = handle;
   };
 
   const cancelTraining = () => {
-    sourceRef.current?.close();
     api.cancelTraining(slug).catch(() => {});
+    handleRef.current?.abort();
+    handleRef.current = null;
     setRunning(false);
     addLog("Training cancelled.");
   };

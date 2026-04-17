@@ -39,8 +39,8 @@ export function Step2Dataset({ onAdvance }: Props) {
   const [progress,    setProgress]    = useState({ done: 0, total: 0, message: "" });
   const [error,       setError]       = useState("");
 
-  const fileRef    = useRef<HTMLInputElement>(null);
-  const sourceRef  = useRef<EventSource | null>(null);
+  const fileRef   = useRef<HTMLInputElement>(null);
+  const handleRef = useRef<api.SSEHandle | null>(null);
 
   // Load dataset images
   useEffect(() => {
@@ -49,25 +49,18 @@ export function Step2Dataset({ onAdvance }: Props) {
         setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })));
       }).catch(() => {});
     }
-    return () => { sourceRef.current?.close(); };
+    return () => { handleRef.current?.abort(); };
   }, [activeProject]);
 
   const startGeneration = () => {
-    if (!activeProject) return;
+    if (!activeProject || method !== "local") return;
     setError("");
-
-    if (method !== "local") {
-      return;
-    }
-
     setRunning(true);
     setProgress({ done: 0, total: count, message: "Starting..." });
 
-    const es = api.startDatasetGen(activeProject.slug, count);
-
-    sourceRef.current = es;
-    api.listenSSE(
-      es,
+    const handle = api.startDatasetGen(
+      activeProject.slug,
+      count,
       (event: StreamEvent) => {
         if (event.type === "progress") {
           setProgress({ done: event.done, total: event.total, message: event.message });
@@ -82,8 +75,18 @@ export function Step2Dataset({ onAdvance }: Props) {
           setRunning(false);
         }
       },
-      () => setRunning(false)
+      () => setRunning(false),
     );
+    handleRef.current = handle;
+  };
+
+  const cancelGeneration = () => {
+    if (activeProject) {
+      api.cancelDatasetGen(activeProject.slug).catch(() => {});
+    }
+    handleRef.current?.abort();
+    handleRef.current = null;
+    setRunning(false);
   };
 
   const uploadManual = async (files: FileList | null) => {
@@ -167,7 +170,7 @@ export function Step2Dataset({ onAdvance }: Props) {
                   <span className="slider-value">{count} images</span>
                 </div>
                 <span className="field-hint">
-                  Face-consistent images will be generated from your reference photo using your GPU.
+                  Face-consistent images will be generated from your reference photo(s) using your GPU.
                 </span>
               </div>
             </div>
@@ -287,7 +290,7 @@ export function Step2Dataset({ onAdvance }: Props) {
             </button>
           )}
           {running && (
-            <button className="btn btn-ghost" onClick={() => sourceRef.current?.close()}>
+            <button className="btn btn-ghost" onClick={cancelGeneration}>
               Cancel
             </button>
           )}

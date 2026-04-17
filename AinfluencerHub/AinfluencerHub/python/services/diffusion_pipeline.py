@@ -157,27 +157,40 @@ def unload() -> None:
 
 
 def generate_dataset(
-    reference_image: Path,
+    reference_images: list[Path] | Path,
     prompts: list[str],
     trigger_word: str,
     output_dir: Path,
     hf_token: str = "",
     progress_cb: Callable[[int, int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    # Legacy support
+    reference_image: Path | None = None,
 ) -> list[Path]:
     """
     Generate face-consistent dataset images using IP-Adapter.
 
-    Uses the reference image's face to guide generation, producing varied
-    poses and settings while maintaining face identity.
+    Accepts one or more reference images. When multiple references are
+    provided, they are cycled across prompts to improve identity coverage
+    and pose diversity.
     """
+    # Normalize input: support both old single-image and new multi-image API
+    if reference_image is not None and not reference_images:
+        refs = [reference_image]
+    elif isinstance(reference_images, Path):
+        refs = [reference_images]
+    else:
+        refs = list(reference_images) if reference_images else []
+    if not refs:
+        raise ValueError("At least one reference image is required.")
+
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
     paths: list[Path] = []
 
     try:
         _load_ip_adapter(hf_token)
-        face_image = _prepare_face_image(reference_image)
+        face_images = [_prepare_face_image(r) for r in refs]
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
@@ -192,6 +205,7 @@ def generate_dataset(
             import torch
             generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
 
+            face_image = face_images[i % len(face_images)]
             try:
                 result = _pipeline(
                     prompt=full_prompt,

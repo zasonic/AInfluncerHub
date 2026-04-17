@@ -6,6 +6,9 @@
  *
  * All GPU operations (generation, training, captioning) run natively
  * on the backend — no external services required.
+ *
+ * All mutating operations use POST (not GET) per HTTP semantics.
+ * Sensitive tokens are sent in POST bodies, never in URLs.
  */
 
 import type {
@@ -89,15 +92,101 @@ export const uploadReferences = async (
   return res.json();
 };
 
+// ── POST-based SSE helper ─────────────────────────────────────────────────
+
+export interface SSEHandle {
+  abort: () => void;
+}
+
+/**
+ * Start a POST-based SSE stream. Uses fetch() instead of EventSource so
+ * we can send JSON bodies (and keep tokens out of URLs).
+ */
+export function startPostSSE(
+  path:       string,
+  body:       unknown,
+  onEvent:    (e: StreamEvent) => void,
+  onComplete: () => void,
+): SSEHandle {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const res = await fetch(`${_baseUrl}${path}`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body:    JSON.stringify(body),
+        signal:  controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        onEvent({ type: "error", message: text || `HTTP ${res.status}` });
+        onComplete();
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) { onComplete(); return; }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data:")) continue;
+          const jsonStr = trimmed.slice(5).trim();
+          if (!jsonStr) continue;
+          try {
+            const event = JSON.parse(jsonStr) as StreamEvent;
+            onEvent(event);
+            if (event.type === "done" || event.type === "error") {
+              reader.cancel();
+              onComplete();
+              return;
+            }
+          } catch {
+            // ignore malformed
+          }
+        }
+      }
+      onComplete();
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        onEvent({ type: "error", message: String(err) });
+      }
+      onComplete();
+    }
+  })();
+
+  return { abort: () => controller.abort() };
+}
+
 // ── Dataset ────────────────────────────────────────────────────────────────
 
-export const startDatasetGen = (
+export function startDatasetGen(
   slug:  string,
   count: number,
-): EventSource =>
-  new EventSource(
-    `${_baseUrl}/api/dataset/${slug}/generate?count=${count}`
+  onEvent: (e: StreamEvent) => void,
+  onComplete: () => void,
+): SSEHandle {
+  return startPostSSE(
+    `/api/dataset/${slug}/generate`,
+    { count },
+    onEvent,
+    onComplete,
   );
+}
+
+export const cancelDatasetGen = (slug: string) =>
+  request<void>("POST", `/api/dataset/${slug}/cancel`);
 
 export const uploadDatasetImages = async (
   slug:  string,
@@ -129,15 +218,25 @@ export const scoreDataset = (slug: string) =>
     "POST", `/api/dataset/${slug}/score`
   );
 
-/** Returns an EventSource streaming SSE progress events */
-export const startCaptioning = (
-  slug: string,
-  hf_token: string,
-  captioner: "florence2" | "joycaption" = "florence2"
-): EventSource =>
-  new EventSource(
-    `${_baseUrl}/api/captions/${slug}/run?hf_token=${encodeURIComponent(hf_token)}&captioner=${captioner}`
+// ── Captions ──────────────────────────────────────────────────────────────
+
+export function startCaptioning(
+  slug:      string,
+  hf_token:  string,
+  captioner: "florence2" | "joycaption",
+  onEvent:   (e: StreamEvent) => void,
+  onComplete: () => void,
+): SSEHandle {
+  return startPostSSE(
+    `/api/captions/${slug}/run`,
+    { hf_token, captioner },
+    onEvent,
+    onComplete,
   );
+}
+
+export const cancelCaptioning = (slug: string) =>
+  request<void>("POST", `/api/captions/${slug}/cancel`);
 
 export const getCaptions = (slug: string) =>
   request<CaptionMap>("GET", `/api/captions/${slug}`);
@@ -153,18 +252,22 @@ export const injectTrigger = (slug: string) =>
 
 // ── Training ───────────────────────────────────────────────────────────────
 
-export const startTraining = (
+export function startTraining(
   slug:          string,
   hf_token:      string,
   steps:         number,
   rank:          number,
-  learning_rate: string
-): EventSource =>
-  new EventSource(
-    `${_baseUrl}/api/training/${slug}/start?` +
-    `hf_token=${encodeURIComponent(hf_token)}&` +
-    `steps=${steps}&rank=${rank}&lr=${encodeURIComponent(learning_rate)}`
+  learning_rate: string,
+  onEvent:       (e: StreamEvent) => void,
+  onComplete:    () => void,
+): SSEHandle {
+  return startPostSSE(
+    `/api/training/${slug}/start`,
+    { hf_token, steps, rank, learning_rate },
+    onEvent,
+    onComplete,
   );
+}
 
 export const cancelTraining = (slug: string) =>
   request<void>("POST", `/api/training/${slug}/cancel`);
@@ -181,27 +284,35 @@ export const downloadModel = (modelHfId: string): EventSource =>
 
 // ── Studio ─────────────────────────────────────────────────────────────────
 
-export const generateImage = (
+export function generateImage(
   slug:           string,
   prompt:         string,
   lora_strength:  number,
-): EventSource =>
-  new EventSource(
-    `${_baseUrl}/api/studio/${slug}/generate?` +
-    `prompt=${encodeURIComponent(prompt)}&` +
-    `lora_strength=${lora_strength}`
+  onEvent:        (e: StreamEvent) => void,
+  onComplete:     () => void,
+): SSEHandle {
+  return startPostSSE(
+    `/api/studio/${slug}/generate`,
+    { prompt, lora_strength },
+    onEvent,
+    onComplete,
   );
+}
 
-export const animateImage = (
-  slug:         string,
-  image_path:   string,
-  motion_prompt: string
-): EventSource =>
-  new EventSource(
-    `${_baseUrl}/api/studio/${slug}/animate?` +
-    `image_path=${encodeURIComponent(image_path)}&` +
-    `motion_prompt=${encodeURIComponent(motion_prompt)}`
+export function animateImage(
+  slug:          string,
+  image_path:    string,
+  motion_prompt: string,
+  onEvent:       (e: StreamEvent) => void,
+  onComplete:    () => void,
+): SSEHandle {
+  return startPostSSE(
+    `/api/studio/${slug}/animate`,
+    { image_path, motion_prompt },
+    onEvent,
+    onComplete,
   );
+}
 
 export const getGeneratedImages = (slug: string) =>
   request<{ images: GeneratedImage[] }>("GET", `/api/studio/${slug}/images`);
@@ -222,12 +333,8 @@ export const updateSettings = (data: Partial<AppSettings>) =>
 export const imageUrl = (path: string) =>
   `${_baseUrl}/api/files/image?path=${encodeURIComponent(path)}`;
 
-// ── SSE helper ─────────────────────────────────────────────────────────────
+// ── Legacy SSE helper (for GET-based EventSource like model downloads) ────
 
-/**
- * Wraps an EventSource in a cleaner callback interface.
- * Handles JSON parsing and cleanup automatically.
- */
 export function listenSSE(
   source:     EventSource,
   onEvent:    (e: StreamEvent) => void,

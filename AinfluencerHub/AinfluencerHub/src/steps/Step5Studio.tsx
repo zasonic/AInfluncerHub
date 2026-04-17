@@ -25,8 +25,8 @@ export function Step5Studio({ onAdvance }: Props) {
   const [genError,    setGenError]    = useState("");
   const [vidError,    setVidError]    = useState("");
 
-  const genSourceRef = useRef<EventSource | null>(null);
-  const vidSourceRef = useRef<EventSource | null>(null);
+  const genHandleRef = useRef<api.SSEHandle | null>(null);
+  const vidHandleRef = useRef<api.SSEHandle | null>(null);
   const slug         = activeProject?.slug ?? "";
 
   // Pre-fill prompt with trigger word
@@ -44,8 +44,8 @@ export function Step5Studio({ onAdvance }: Props) {
     api.getGeneratedImages(slug).then(({ images }) => setGenImages(images)).catch(() => {});
     api.getVideos(slug).then(({ videos: vids }) => setVideos(vids)).catch(() => {});
     return () => {
-      genSourceRef.current?.close();
-      vidSourceRef.current?.close();
+      genHandleRef.current?.abort();
+      vidHandleRef.current?.abort();
     };
   }, [slug]);
 
@@ -55,10 +55,8 @@ export function Step5Studio({ onAdvance }: Props) {
     setGenerating(true);
     setGenStatus("Starting generation...");
 
-    const es = api.generateImage(slug, prompt, strength);
-    genSourceRef.current = es;
-    api.listenSSE(
-      es,
+    const handle = api.generateImage(
+      slug, prompt, strength,
       (event: StreamEvent) => {
         if (event.type === "progress" || event.type === "log") {
           setGenStatus(event.type === "progress" ? event.message : (event as { line: string }).line);
@@ -71,8 +69,9 @@ export function Step5Studio({ onAdvance }: Props) {
           setGenerating(false);
         }
       },
-      () => setGenerating(false)
+      () => setGenerating(false),
     );
+    genHandleRef.current = handle;
   };
 
   const animateImage = () => {
@@ -81,10 +80,8 @@ export function Step5Studio({ onAdvance }: Props) {
     setAnimating(true);
     setVidStatus("Starting video generation...");
 
-    const es = api.animateImage(slug, selectedImg.path, motionPrompt);
-    vidSourceRef.current = es;
-    api.listenSSE(
-      es,
+    const handle = api.animateImage(
+      slug, selectedImg.path, motionPrompt,
       (event: StreamEvent) => {
         if (event.type === "progress" || event.type === "log") {
           setVidStatus(event.type === "progress" ? event.message : (event as { line: string }).line);
@@ -97,8 +94,9 @@ export function Step5Studio({ onAdvance }: Props) {
           setAnimating(false);
         }
       },
-      () => setAnimating(false)
+      () => setAnimating(false),
     );
+    vidHandleRef.current = handle;
   };
 
   const openFolder = async (path: string) => {
