@@ -1,0 +1,29 @@
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["AinfluencerHub/AinfluencerHub/src-tauri", "node_modules"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line length — cosmetic, ruff format handles it
+    "E402",  # late imports are deliberate in pipeline modules
+    "B008",  # FastAPI uses Query() / File() in defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["B", "E"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+files = [
+    "AinfluencerHub/AinfluencerHub/python/core",
+    "AinfluencerHub/AinfluencerHub/python/services/models.py",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["AinfluencerHub/AinfluencerHub/python/tests"]
+pythonpath = ["AinfluencerHub/AinfluencerHub/python"]

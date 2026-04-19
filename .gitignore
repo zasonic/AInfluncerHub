@@ -1,0 +1,51 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# ── Node / frontend ──────────────────────────────────────────────────────────
+node_modules/
+.pnp.*
+.vite/
+.turbo/
+coverage/
+
+# Compiled frontend output
+AinfluencerHub/AinfluencerHub/dist/
+
+# ── Rust / Tauri ─────────────────────────────────────────────────────────────
+AinfluencerHub/AinfluencerHub/src-tauri/target/
+AinfluencerHub/AinfluencerHub/src-tauri/Cargo.lock
+
+# ── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.local
+*.local
+
+# ── ML artifacts ─────────────────────────────────────────────────────────────
+# Trained weights, generated media, and model caches can be huge.
+*.safetensors
+*.ckpt
+*.bin
+AinfluencerHub/AinfluencerHub/output/
+output/influencers/
+.cache/huggingface/

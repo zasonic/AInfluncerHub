@@ -14,12 +14,10 @@ export function App() {
   const {
     activeProject,
     activeStep,
-    projects,
     loadProjects,
     loadSettings,
     setActiveStep,
     setActiveProject,
-    setError,
   } = useStore();
 
   const [showSettings,   setShowSettings]   = useState(false);

@@ -16,7 +16,6 @@ import type {
   ModelStatusMap,
   PreflightResult,
   Project,
-  StreamEvent,
 } from "./types";
 
 let _baseUrl = "http://localhost:8765";
@@ -222,34 +221,4 @@ export const updateSettings = (data: Partial<AppSettings>) =>
 export const imageUrl = (path: string) =>
   `${_baseUrl}/api/files/image?path=${encodeURIComponent(path)}`;
 
-// ── SSE helper ─────────────────────────────────────────────────────────────
-
-/**
- * Wraps an EventSource in a cleaner callback interface.
- * Handles JSON parsing and cleanup automatically.
- */
-export function listenSSE(
-  source:     EventSource,
-  onEvent:    (e: StreamEvent) => void,
-  onComplete: () => void
-): () => void {
-  source.onmessage = (ev) => {
-    try {
-      const event = JSON.parse(ev.data) as StreamEvent;
-      onEvent(event);
-      if (event.type === "done" || event.type === "error") {
-        source.close();
-        onComplete();
-      }
-    } catch {
-      // ignore malformed events
-    }
-  };
-
-  source.onerror = () => {
-    source.close();
-    onComplete();
-  };
-
-  return () => source.close();
-}
+// SSE streaming is consumed through the `useSSE` hook in src/hooks/useSSE.ts.

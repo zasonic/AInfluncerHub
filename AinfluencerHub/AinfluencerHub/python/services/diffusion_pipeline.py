@@ -12,16 +12,12 @@ All operations run locally on the user's GPU without external services.
 import logging
 import random
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+
+from services.models import IP_ADAPTER, SDXL_BASE
 
 log = logging.getLogger("hub.diffusion")
-
-# Base model used for generation
-BASE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
-IP_ADAPTER_REPO = "h94/IP-Adapter"
-IP_ADAPTER_SUBFOLDER = "sdxl_models"
-IP_ADAPTER_WEIGHT_NAME = "ip-adapter-plus-face_sdxl_vit-h.safetensors"
 
 # Lazy globals — loaded on demand, freed after use
 _pipeline = None
@@ -44,7 +40,6 @@ def _load_base_pipeline(hf_token: str = ""):
     if _pipeline is not None:
         return
 
-    import torch
     from diffusers import StableDiffusionXLPipeline
 
     device, dtype = _get_device_and_dtype()
@@ -55,7 +50,7 @@ def _load_base_pipeline(hf_token: str = ""):
         kwargs["token"] = hf_token
 
     _pipeline = StableDiffusionXLPipeline.from_pretrained(
-        BASE_MODEL_ID, **kwargs
+        SDXL_BASE.repo_id, revision=SDXL_BASE.revision, **kwargs
     )
     _pipeline.to(device)
 
@@ -79,9 +74,9 @@ def _load_ip_adapter(hf_token: str = ""):
 
     log.info("Loading IP-Adapter face model...")
     _pipeline.load_ip_adapter(
-        IP_ADAPTER_REPO,
-        subfolder=IP_ADAPTER_SUBFOLDER,
-        weight_name=IP_ADAPTER_WEIGHT_NAME,
+        IP_ADAPTER.repo_id,
+        subfolder=IP_ADAPTER.subfolder,
+        weight_name=IP_ADAPTER.weight_name,
         token=hf_token or None,
     )
     _pipeline.set_ip_adapter_scale(0.7)
@@ -109,7 +104,6 @@ def _get_face_app():
 def _extract_face_embedding(image_path: Path):
     """Extract face embedding from a reference image."""
     import cv2
-    import numpy as np
 
     app = _get_face_app()
     img = cv2.imread(str(image_path))

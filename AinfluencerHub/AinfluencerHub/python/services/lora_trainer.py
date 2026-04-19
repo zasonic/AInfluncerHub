@@ -10,15 +10,16 @@ by the diffusion_pipeline for inference.
 """
 
 import logging
-import math
 import shutil
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+
+from services.models import SDXL_BASE
 
 log = logging.getLogger("hub.trainer")
 
-BASE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
+BASE_MODEL_ID = SDXL_BASE.repo_id
 
 
 def prepare_training_folder(
@@ -53,6 +54,7 @@ def run_training(
     Returns (success, message).
     """
     import os
+
     import torch
     import torch.nn.functional as F
     from PIL import Image

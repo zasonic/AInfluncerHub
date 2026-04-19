@@ -7,50 +7,22 @@ standard HuggingFace Hub cache (~/.cache/huggingface/).
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+
+from services.models import manifest as _registry_manifest
 
 log = logging.getLogger("hub.models")
 
-# ── Model manifest ───────────────────────────────────────────────────────────
-
+# Kept for backwards-compatibility with any caller that expects a plain dict.
 MODEL_MANIFEST: dict[str, dict] = {
-    "base_model": {
-        "hf_id":    "stabilityai/stable-diffusion-xl-base-1.0",
-        "size_gb":  6.5,
-        "purpose":  "Image generation base model (Steps 2 & 5)",
-        "required": True,
-    },
-    "ip_adapter": {
-        "hf_id":    "h94/IP-Adapter",
-        "size_gb":  1.8,
-        "purpose":  "Face-consistent dataset generation (Step 2)",
-        "required": True,
-    },
-    "captioner_florence2": {
-        "hf_id":    "microsoft/Florence-2-large",
-        "size_gb":  4.0,
-        "purpose":  "Image captioning (Step 3)",
-        "required": True,
-    },
-    "captioner_joycaption": {
-        "hf_id":    "fancyfeast/llama-joycaption-beta-one-hf-llava",
-        "size_gb":  10.0,
-        "purpose":  "Advanced captioning for training (Step 3)",
-        "required": False,
-    },
-    "training_base": {
-        "hf_id":    "stabilityai/stable-diffusion-xl-base-1.0",
-        "size_gb":  6.5,
-        "purpose":  "LoRA training base model (Step 4)",
-        "required": True,
-    },
-    "video_wan": {
-        "hf_id":    "Wan-AI/Wan2.1-T2V-14B-Diffusers",
-        "size_gb":  28.0,
-        "purpose":  "Image-to-video animation (Step 5)",
-        "required": False,
-    },
+    key: {
+        "hf_id":    info["hf_id"],
+        "size_gb":  info["size_gb"],
+        "purpose":  info["purpose"],
+        "required": info["required"],
+    }
+    for key, info in _registry_manifest().items()
 }
 
 
@@ -58,7 +30,6 @@ def check_model_cached(hf_id: str) -> bool:
     """Check if a HuggingFace model is already cached locally."""
     try:
         from huggingface_hub import try_to_load_from_cache
-        from huggingface_hub.utils import LocalEntryNotFoundError
 
         # Check for the config file — if present, model is cached
         result = try_to_load_from_cache(hf_id, "config.json")

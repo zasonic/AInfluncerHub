@@ -4,7 +4,8 @@ import { useStore } from "../store";
 import * as api from "../api";
 import type { ImageScore } from "../api";
 import { ImageGallery } from "../components/ImageGallery";
-import type { StreamEvent } from "../types";
+import { useAsyncOperation } from "../hooks/useAsyncOperation";
+import { useSSE } from "../hooks/useSSE";
 
 interface Props {
   onAdvance: () => void;
@@ -28,90 +29,73 @@ const METHODS: { id: Method; title: string; desc: string }[] = [
 export function Step2Dataset({ onAdvance }: Props) {
   const { activeProject, settings, refreshProject } = useStore();
 
-  const [method,      setMethod]      = useState<Method>(
+  const [method,  setMethod]  = useState<Method>(
     settings?.dataset_method === "manual" ? "manual" : "local"
   );
-  const [count,       setCount]       = useState(25);
-  const [images,      setImages]      = useState<{ path: string; filename: string }[]>([]);
-  const [running,     setRunning]     = useState(false);
-  const [scoring,     setScoring]     = useState(false);
-  const [scores,      setScores]      = useState<ImageScore[] | null>(null);
-  const [progress,    setProgress]    = useState({ done: 0, total: 0, message: "" });
-  const [error,       setError]       = useState("");
+  const [count,   setCount]   = useState(25);
+  const [images,  setImages]  = useState<{ path: string; filename: string }[]>([]);
+  const [scoring, setScoring] = useState(false);
+  const [scores,  setScores]  = useState<ImageScore[] | null>(null);
 
-  const fileRef    = useRef<HTMLInputElement>(null);
-  const sourceRef  = useRef<EventSource | null>(null);
+  const op  = useAsyncOperation();
+  const sse = useSSE({
+    onEvent: (event) => {
+      if (event.type === "progress") {
+        op.setProgress(event.done, event.total, event.message);
+      } else if (event.type === "done") {
+        op.succeed();
+        if (activeProject) {
+          refreshProject(activeProject.slug);
+          api.getDatasetImages(activeProject.slug).then(({ images: imgs }) => {
+            setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })));
+          }).catch(() => {});
+        }
+      } else if (event.type === "error") {
+        op.fail(event.message);
+      }
+    },
+  });
 
-  // Load dataset images
+  const { running, progress, error } = op.state;
+  const fileRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     if (activeProject) {
       api.getDatasetImages(activeProject.slug).then(({ images: imgs }) => {
         setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })));
       }).catch(() => {});
     }
-    return () => { sourceRef.current?.close(); };
   }, [activeProject]);
 
   const startGeneration = () => {
-    if (!activeProject) return;
-    setError("");
-
-    if (method !== "local") {
-      return;
-    }
-
-    setRunning(true);
-    setProgress({ done: 0, total: count, message: "Starting..." });
-
-    const es = api.startDatasetGen(activeProject.slug, count);
-
-    sourceRef.current = es;
-    api.listenSSE(
-      es,
-      (event: StreamEvent) => {
-        if (event.type === "progress") {
-          setProgress({ done: event.done, total: event.total, message: event.message });
-        } else if (event.type === "done") {
-          setRunning(false);
-          refreshProject(activeProject.slug);
-          api.getDatasetImages(activeProject.slug).then(({ images: imgs }) => {
-            setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })));
-          }).catch(() => {});
-        } else if (event.type === "error") {
-          setError(event.message);
-          setRunning(false);
-        }
-      },
-      () => setRunning(false)
-    );
+    if (!activeProject || method !== "local") return;
+    op.start("Starting...", count);
+    sse.start(api.startDatasetGen(activeProject.slug, count));
   };
 
   const uploadManual = async (files: FileList | null) => {
     if (!files || !activeProject) return;
-    setRunning(true);
-    setError("");
+    op.start("Uploading...", files.length);
     try {
       const result = await api.uploadDatasetImages(activeProject.slug, Array.from(files));
       await refreshProject(activeProject.slug);
       const { images: imgs } = await api.getDatasetImages(activeProject.slug);
       setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })));
-      setProgress({ done: result.count, total: result.count, message: `${result.count} images uploaded.` });
+      op.setProgress(result.count, result.count, `${result.count} images uploaded.`);
+      op.succeed();
     } catch (e) {
-      setError(String(e));
-    } finally {
-      setRunning(false);
+      op.fail(String(e));
     }
   };
 
   const runScoring = async () => {
     if (!activeProject) return;
     setScoring(true);
-    setError("");
     try {
       const result = await api.scoreDataset(activeProject.slug);
       setScores(result.scores);
     } catch (e) {
-      setError(String(e));
+      op.fail(String(e));
     } finally {
       setScoring(false);
     }
@@ -287,7 +271,7 @@ export function Step2Dataset({ onAdvance }: Props) {
             </button>
           )}
           {running && (
-            <button className="btn btn-ghost" onClick={() => sourceRef.current?.close()}>
+            <button className="btn btn-ghost" onClick={sse.stop}>
               Cancel
             </button>
           )}

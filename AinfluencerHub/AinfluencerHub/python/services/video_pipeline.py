@@ -9,14 +9,15 @@ All operations run locally on the user's GPU without external services.
 
 import logging
 import random
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+
+from services.models import COGVIDEO, WAN_VIDEO
 
 log = logging.getLogger("hub.video")
 
-# Model options (user can choose based on VRAM)
-WAN_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
-COGVIDEO_MODEL_ID = "THUDM/CogVideoX-5b-I2V"
+WAN_MODEL_ID = WAN_VIDEO.repo_id
+COGVIDEO_MODEL_ID = COGVIDEO.repo_id
 
 # Lazy global
 _pipeline = None
@@ -39,7 +40,6 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
     if _pipeline is not None:
         return
 
-    import torch
 
     device, dtype = _get_device_and_dtype()
 
