@@ -25,17 +25,18 @@ class SettingsModel(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    output_dir:      str                              = ""
-    hf_token:        str                              = ""
-    dataset_method:  Literal["local", "manual"]       = "local"
-    training_steps:  int                              = Field(2000, ge=100, le=20_000)
-    lora_rank:       int                              = Field(16, ge=2, le=256)
-    learning_rate:   str                              = "1e-4"
-    preferred_model: str                              = "sdxl"
-    video_model:     str                              = "wan2.1"
-    theme:           Literal["dark"]                  = "dark"
-    last_project:    str                              = ""
-    setup_complete:  bool                             = False
+    output_dir:        str                              = ""
+    hf_token:          str                              = ""
+    dataset_method:    Literal["local", "manual"]       = "local"
+    training_steps:    int                              = Field(2000, ge=100, le=20_000)
+    lora_rank:         int                              = Field(16, ge=2, le=256)
+    learning_rate:     str                              = "1e-4"
+    ip_adapter_scale:  float                            = Field(0.7, ge=0.1, le=1.5)
+    preferred_model:   str                              = "sdxl"
+    video_model:       str                              = "wan2.1"
+    theme:             Literal["dark"]                  = "dark"
+    last_project:      str                              = ""
+    setup_complete:    bool                             = False
 
 
 DEFAULTS: dict[str, Any] = SettingsModel().model_dump()

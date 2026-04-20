@@ -64,10 +64,11 @@ def _load_base_pipeline(hf_token: str = ""):
     log.info("SDXL pipeline loaded.")
 
 
-def _load_ip_adapter(hf_token: str = ""):
+def _load_ip_adapter(hf_token: str = "", ip_adapter_scale: float = 0.7):
     """Load IP-Adapter for face-consistent generation."""
     global _ip_adapter_loaded
     if _ip_adapter_loaded:
+        _pipeline.set_ip_adapter_scale(ip_adapter_scale)
         return
 
     _load_base_pipeline(hf_token)
@@ -79,9 +80,9 @@ def _load_ip_adapter(hf_token: str = ""):
         weight_name=IP_ADAPTER.weight_name,
         token=hf_token or None,
     )
-    _pipeline.set_ip_adapter_scale(0.7)
+    _pipeline.set_ip_adapter_scale(ip_adapter_scale)
     _ip_adapter_loaded = True
-    log.info("IP-Adapter loaded.")
+    log.info("IP-Adapter loaded (scale=%.2f).", ip_adapter_scale)
 
 
 def _get_face_app():
@@ -129,9 +130,12 @@ def _prepare_face_image(image_path: Path):
 
 def unload() -> None:
     """Release all GPU memory."""
+    import gc
+
     global _pipeline, _ip_adapter_loaded, _face_app
 
     if _pipeline is not None:
+        _pipeline.to("cpu")
         del _pipeline
         _pipeline = None
         _ip_adapter_loaded = False
@@ -140,9 +144,11 @@ def unload() -> None:
         del _face_app
         _face_app = None
 
+    gc.collect()
     import torch
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
 
     log.info("Diffusion pipeline unloaded.")
 
@@ -156,6 +162,7 @@ def generate_dataset(
     trigger_word: str,
     output_dir: Path,
     hf_token: str = "",
+    ip_adapter_scale: float = 0.7,
     progress_cb: Callable[[int, int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> list[Path]:
@@ -164,13 +171,16 @@ def generate_dataset(
 
     Uses the reference image's face to guide generation, producing varied
     poses and settings while maintaining face identity.
+
+    ip_adapter_scale controls face consistency strength (0.1–1.5).
+    Higher values produce more face-accurate images but less prompt variety.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
     paths: list[Path] = []
 
     try:
-        _load_ip_adapter(hf_token)
+        _load_ip_adapter(hf_token, ip_adapter_scale=ip_adapter_scale)
         face_image = _prepare_face_image(reference_image)
 
         for i, prompt in enumerate(prompts):

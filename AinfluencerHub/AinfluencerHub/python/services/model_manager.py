@@ -95,28 +95,52 @@ def download_model(
     hf_id: str,
     hf_token: str = "",
     progress_cb: Callable[[str], None] | None = None,
+    max_retries: int = 3,
 ) -> tuple[bool, str]:
     """
-    Download a model from HuggingFace Hub.
+    Download a model from HuggingFace Hub with automatic retry on
+    transient network failures.
     Returns (success, message).
     """
-    try:
-        from huggingface_hub import snapshot_download
+    import time
 
-        if progress_cb:
-            progress_cb(f"Downloading {hf_id}...")
+    from huggingface_hub import snapshot_download
 
-        kwargs: dict = {}
-        if hf_token:
-            kwargs["token"] = hf_token
+    kwargs: dict = {}
+    if hf_token:
+        kwargs["token"] = hf_token
 
-        snapshot_download(hf_id, **kwargs)
+    last_error = ""
+    for attempt in range(1, max_retries + 1):
+        try:
+            if progress_cb:
+                label = f"Downloading {hf_id}..."
+                if attempt > 1:
+                    label = f"Retry {attempt}/{max_retries}: downloading {hf_id}..."
+                progress_cb(label)
 
-        if progress_cb:
-            progress_cb(f"Downloaded {hf_id} successfully.")
-        return True, f"Model {hf_id} downloaded."
+            snapshot_download(hf_id, **kwargs)
 
-    except Exception as exc:
-        msg = f"Download failed for {hf_id}: {str(exc)[:200]}"
-        log.error(msg)
-        return False, msg
+            if progress_cb:
+                progress_cb(f"Downloaded {hf_id} successfully.")
+            return True, f"Model {hf_id} downloaded."
+
+        except (OSError, ConnectionError, TimeoutError) as exc:
+            last_error = str(exc)[:200]
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                log.warning("Download attempt %d/%d failed (%s), retrying in %ds...",
+                            attempt, max_retries, last_error, wait)
+                if progress_cb:
+                    progress_cb(f"Download interrupted, retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                break
+        except Exception as exc:
+            msg = f"Download failed for {hf_id}: {str(exc)[:200]}"
+            log.error(msg)
+            return False, msg
+
+    msg = f"Download failed for {hf_id} after {max_retries} attempts: {last_error}"
+    log.error(msg)
+    return False, msg

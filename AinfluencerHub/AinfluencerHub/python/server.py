@@ -212,12 +212,14 @@ async def generate_dataset_images(
         try:
             from services.diffusion_pipeline import generate_dataset
             hf_token = settings.get("hf_token", "")
+            ip_scale = settings.get("ip_adapter_scale", 0.7)
             generate_dataset(
                 reference_image=refs[0],
                 prompts=prompts,
                 trigger_word=proj.trigger_word,
                 output_dir=proj.dataset_dir,
                 hf_token=hf_token,
+                ip_adapter_scale=ip_scale,
                 progress_cb=lambda done, total, msg: q.put(
                     {"type": "progress", "done": done, "total": total, "message": msg}
                 ),
@@ -529,11 +531,13 @@ async def animate_image(
         try:
             from services.video_pipeline import generate_video
             hf_token = settings.get("hf_token", "")
+            video_model = settings.get("video_model", "wan2.1")
             q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting video generation..."})
             video = generate_video(
                 image_path=Path(image_path),
                 prompt=motion_prompt,
                 output_dir=proj.videos_dir,
+                model_id=video_model,
                 hf_token=hf_token,
                 progress_cb=lambda m: q.put(
                     {"type": "progress", "done": 0, "total": 1, "message": m}

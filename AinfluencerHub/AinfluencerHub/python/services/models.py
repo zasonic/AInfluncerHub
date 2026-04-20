@@ -56,8 +56,15 @@ JOY_CAPTIONER = ModelSpec(
 
 WAN_VIDEO = ModelSpec(
     repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
+    purpose="Image-to-video animation — best quality (Step 5)",
     size_gb=28.0,
+    required=False,
+)
+
+WAN_VIDEO_LITE = ModelSpec(
+    repo_id="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    purpose="Image-to-video animation — lightweight, 8 GB VRAM (Step 5)",
+    size_gb=2.6,
     required=False,
 )
 
@@ -77,6 +84,7 @@ ALL: dict[str, ModelSpec] = {
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
     "wan_video":        WAN_VIDEO,
+    "wan_video_lite":   WAN_VIDEO_LITE,
     "cogvideo":         COGVIDEO,
 }
 

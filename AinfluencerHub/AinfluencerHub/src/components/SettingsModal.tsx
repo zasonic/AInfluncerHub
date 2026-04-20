@@ -114,16 +114,36 @@ export function SettingsModal({ onClose }: Props) {
         </div>
 
         <div className="field">
+          <label>
+            Face consistency strength: {Number(form.ip_adapter_scale ?? 0.7).toFixed(2)}
+          </label>
+          <input
+            type="range"
+            min="0.3"
+            max="1.2"
+            step="0.05"
+            value={Number(form.ip_adapter_scale ?? 0.7)}
+            onChange={(e) => setForm((f) => ({ ...f, ip_adapter_scale: parseFloat(e.target.value) }))}
+            style={{ width: "100%" }}
+          />
+          <span className="field-hint">
+            Controls how closely generated images match the reference face.
+            Higher = more accurate face, lower = more creative variety. Default: 0.70
+          </span>
+        </div>
+
+        <div className="field">
           <label>Video model</label>
           <select
             value={String(form.video_model ?? "wan2.1")}
             onChange={(e) => setForm((f) => ({ ...f, video_model: e.target.value }))}
             style={{ width: "100%", fontSize: 12 }}
           >
-            <option value="wan2.1">Wan 2.1 (best quality)</option>
-            <option value="cogvideo">CogVideoX (lighter)</option>
+            <option value="wan2.1">Wan 2.1 14B (best quality, 24+ GB VRAM)</option>
+            <option value="wan2.1-lite">Wan 2.1 1.3B (good quality, 8 GB VRAM)</option>
+            <option value="cogvideo">CogVideoX 5B (fallback, 16 GB VRAM)</option>
           </select>
-          <span className="field-hint">Model for image-to-video animation.</span>
+          <span className="field-hint">Model for image-to-video animation. Choose based on your GPU memory.</span>
         </div>
 
         <div className="flex justify-between mt-24">

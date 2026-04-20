@@ -163,11 +163,14 @@ def run_training(
 
     # ── Step 4: Build dataset & dataloader ───────────────────────────────
 
+    resolution = 1024
+
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
             self.pairs = pairs
             self.tokenizer_1 = tokenizer_1
             self.tokenizer_2 = tokenizer_2
+            self.resolution = resolution
             self.transform = transforms.Compose([
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
@@ -280,7 +283,8 @@ def run_training(
 
         # Time IDs for SDXL (original_size + crop_coords + target_size)
         add_time_ids = torch.tensor(
-            [[1024, 1024, 0, 0, 1024, 1024]], dtype=weight_dtype, device=device,
+            [[resolution, resolution, 0, 0, resolution, resolution]],
+            dtype=weight_dtype, device=device,
         )
         added_cond_kwargs = {
             "text_embeds": pooled_prompt_embeds,
@@ -354,15 +358,21 @@ def run_training(
 
 
 def _cleanup(*models) -> None:
-    """Free GPU memory."""
+    """Free GPU memory reliably."""
+    import gc
+
     import torch
 
     for model in models:
         try:
+            if hasattr(model, "cpu"):
+                model.cpu()
             del model
         except Exception:
             pass
 
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
     log.info("Training models unloaded.")

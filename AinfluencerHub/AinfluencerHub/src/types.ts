@@ -21,6 +21,7 @@ export interface AppSettings {
   training_steps:      number;
   lora_rank:           number;
   learning_rate:       string;
+  ip_adapter_scale:    number;
   preferred_model:     string;
   video_model:         string;
   theme:               "dark";

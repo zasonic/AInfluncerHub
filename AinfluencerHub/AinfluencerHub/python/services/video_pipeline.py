@@ -12,12 +12,19 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import COGVIDEO, WAN_VIDEO
+from services.models import COGVIDEO, WAN_VIDEO, WAN_VIDEO_LITE
 
 log = logging.getLogger("hub.video")
 
 WAN_MODEL_ID = WAN_VIDEO.repo_id
+WAN_LITE_MODEL_ID = WAN_VIDEO_LITE.repo_id
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
+
+VIDEO_MODEL_MAP: dict[str, str] = {
+    "wan2.1":      WAN_MODEL_ID,
+    "wan2.1-lite": WAN_LITE_MODEL_ID,
+    "cogvideo":    COGVIDEO_MODEL_ID,
+}
 
 # Lazy global
 _pipeline = None
@@ -45,6 +52,7 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
 
     if not model_id:
         model_id = WAN_MODEL_ID
+    model_id = VIDEO_MODEL_MAP.get(model_id, model_id)
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -79,6 +87,8 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
 
 def unload() -> None:
     """Release all GPU memory."""
+    import gc
+
     global _pipeline, _pipeline_type
 
     if _pipeline is not None:
@@ -86,9 +96,11 @@ def unload() -> None:
         _pipeline = None
         _pipeline_type = None
 
+    gc.collect()
     import torch
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
 
     log.info("Video pipeline unloaded.")
 
@@ -143,7 +155,11 @@ def generate_video(
 
         if seed < 0:
             seed = random.randint(0, 2**32 - 1)
-        generator = torch.Generator(device="cpu").manual_seed(seed)
+        gen_device = _pipeline.device if hasattr(_pipeline, "device") else "cpu"
+        try:
+            generator = torch.Generator(device=gen_device).manual_seed(seed)
+        except RuntimeError:
+            generator = torch.Generator(device="cpu").manual_seed(seed)
 
         if progress_cb:
             progress_cb("Generating video... this may take several minutes.")
