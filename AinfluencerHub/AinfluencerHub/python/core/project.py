@@ -62,7 +62,7 @@ class Project:
         path = root / "project.json"
         if not path.exists():
             raise FileNotFoundError(f"No project.json in {root}")
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return cls(root, data)
 

@@ -17,17 +17,16 @@ import asyncio
 import json
 import logging
 import os
-import queue
-import shutil
 import sys
 import threading
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -35,8 +34,8 @@ from sse_starlette.sse import EventSourceResponse
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+from core.project import Project
 from core.settings import Settings
-from core.project   import Project
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,16 +69,35 @@ app.add_middleware(
 def _sse_event(data: dict) -> dict:
     return {"data": json.dumps(data)}
 
-async def _drain_queue(q: queue.Queue) -> AsyncGenerator:
-    """Yield SSE events from a thread-safe queue until a done/error sentinel."""
-    while True:
-        try:
-            item = q.get_nowait()
+
+class SSEQueue:
+    """
+    Thread-safe queue with async drain semantics.
+
+    Worker threads push via `put()`; the FastAPI endpoint awaits items via the
+    async generator returned by `drain()`. Items push from any thread — pushes
+    are bounced through the running event loop so the awaiter wakes up
+    immediately without polling.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    def put(self, item: dict[str, Any]) -> None:
+        self._loop.call_soon_threadsafe(self._q.put_nowait, item)
+
+    async def drain(self) -> AsyncGenerator[dict, None]:
+        while True:
+            item = await self._q.get()
             yield _sse_event(item)
             if item.get("type") in ("done", "error"):
                 break
-        except queue.Empty:
-            await asyncio.sleep(0.08)
+
+
+def _drain_queue(q: SSEQueue) -> AsyncGenerator[dict, None]:
+    """Legacy-compatible alias so existing callers keep working."""
+    return q.drain()
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
@@ -185,7 +203,7 @@ async def generate_dataset_images(
         all_prompts = json.load(f)
     prompts = [p["prompt"] for p in all_prompts[:count]]
 
-    q      = queue.Queue()
+    q      = SSEQueue()
     cancel = threading.Event()
     with _cancel_lock:
         _cancel_events[slug] = cancel
@@ -286,7 +304,7 @@ async def run_captioning(
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy. Try again shortly.")
 
-    q      = queue.Queue()
+    q      = SSEQueue()
     cancel = threading.Event()
     with _cancel_lock:
         _cancel_events[slug] = cancel
@@ -333,7 +351,7 @@ async def start_training(
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy. Wait for the current task to finish.")
 
-    q      = queue.Queue()
+    q      = SSEQueue()
     cancel = threading.Event()
     with _cancel_lock:
         _cancel_events[slug] = cancel
@@ -411,7 +429,7 @@ async def download_model(model_hf_id: str = Query("")):
     if not model_hf_id.strip():
         raise HTTPException(400, "model_hf_id is required.")
 
-    q = queue.Queue()
+    q = SSEQueue()
 
     def _run():
         from services.model_manager import download_model as _download
@@ -442,7 +460,7 @@ async def generate_image(
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
 
-    q = queue.Queue()
+    q = SSEQueue()
 
     def _run():
         try:
@@ -505,7 +523,7 @@ async def animate_image(
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
 
-    q = queue.Queue()
+    q = SSEQueue()
 
     def _run():
         try:
@@ -575,8 +593,8 @@ def _load_project(slug: str) -> Project:
     root       = output_dir / slug
     try:
         return Project.load(root)
-    except FileNotFoundError:
-        raise HTTPException(404, f"Project '{slug}' not found.")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, f"Project '{slug}' not found.") from exc
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 

@@ -1,5 +1,3 @@
-import { useStore } from "../store";
-
 const STEPS_PREVIEW = [
   { n: "1", title: "Upload a photo",   desc: "One clear photo is all you need to start." },
   { n: "2", title: "Generate dataset", desc: "AI creates 25+ varied poses and angles automatically." },

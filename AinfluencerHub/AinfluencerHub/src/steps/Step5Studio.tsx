@@ -1,33 +1,64 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { FolderOpen, Play } from "lucide-react";
 import { useStore } from "../store";
 import * as api from "../api";
 import { ImageGallery } from "../components/ImageGallery";
-import type { GeneratedImage, GeneratedVideo, StreamEvent } from "../types";
+import { useSSE } from "../hooks/useSSE";
+import type { GeneratedImage, GeneratedVideo } from "../types";
 
 interface Props {
   onAdvance: () => void;
 }
 
-export function Step5Studio({ onAdvance }: Props) {
+export function Step5Studio(_props: Props) {
   const { activeProject, settings } = useStore();
 
-  const [genImages,   setGenImages]   = useState<GeneratedImage[]>([]);
-  const [videos,      setVideos]      = useState<GeneratedVideo[]>([]);
-  const [prompt,      setPrompt]      = useState("");
-  const [strength,    setStrength]    = useState(0.85);
+  const [genImages,    setGenImages]    = useState<GeneratedImage[]>([]);
+  const [videos,       setVideos]       = useState<GeneratedVideo[]>([]);
+  const [prompt,       setPrompt]       = useState("");
+  const [strength,     setStrength]     = useState(0.85);
   const [motionPrompt, setMotionPrompt] = useState("The person smiles gently and turns their head slightly.");
-  const [selectedImg, setSelectedImg] = useState<GeneratedImage | null>(null);
-  const [generating,  setGenerating]  = useState(false);
-  const [animating,   setAnimating]   = useState(false);
-  const [genStatus,   setGenStatus]   = useState("");
-  const [vidStatus,   setVidStatus]   = useState("");
-  const [genError,    setGenError]    = useState("");
-  const [vidError,    setVidError]    = useState("");
+  const [selectedImg,  setSelectedImg]  = useState<GeneratedImage | null>(null);
+  const [generating,   setGenerating]   = useState(false);
+  const [animating,    setAnimating]    = useState(false);
+  const [genStatus,    setGenStatus]    = useState("");
+  const [vidStatus,    setVidStatus]    = useState("");
+  const [genError,     setGenError]     = useState("");
+  const [vidError,     setVidError]     = useState("");
 
-  const genSourceRef = useRef<EventSource | null>(null);
-  const vidSourceRef = useRef<EventSource | null>(null);
-  const slug         = activeProject?.slug ?? "";
+  const slug = activeProject?.slug ?? "";
+
+  const genSSE = useSSE({
+    onEvent: (event) => {
+      if (event.type === "progress" || event.type === "log") {
+        setGenStatus(event.type === "progress" ? event.message : event.line);
+      } else if (event.type === "done") {
+        setGenerating(false);
+        setGenStatus("Image generated.");
+        api.getGeneratedImages(slug).then(({ images }) => setGenImages(images)).catch(() => {});
+      } else if (event.type === "error") {
+        setGenError(event.message);
+        setGenerating(false);
+      }
+    },
+    onTerminate: () => setGenerating(false),
+  });
+
+  const vidSSE = useSSE({
+    onEvent: (event) => {
+      if (event.type === "progress" || event.type === "log") {
+        setVidStatus(event.type === "progress" ? event.message : event.line);
+      } else if (event.type === "done") {
+        setAnimating(false);
+        setVidStatus("Video created.");
+        api.getVideos(slug).then(({ videos: vids }) => setVideos(vids)).catch(() => {});
+      } else if (event.type === "error") {
+        setVidError(event.message);
+        setAnimating(false);
+      }
+    },
+    onTerminate: () => setAnimating(false),
+  });
 
   // Pre-fill prompt with trigger word
   useEffect(() => {
@@ -43,10 +74,6 @@ export function Step5Studio({ onAdvance }: Props) {
     if (!slug) return;
     api.getGeneratedImages(slug).then(({ images }) => setGenImages(images)).catch(() => {});
     api.getVideos(slug).then(({ videos: vids }) => setVideos(vids)).catch(() => {});
-    return () => {
-      genSourceRef.current?.close();
-      vidSourceRef.current?.close();
-    };
   }, [slug]);
 
   const generateImage = () => {
@@ -54,25 +81,7 @@ export function Step5Studio({ onAdvance }: Props) {
     setGenError("");
     setGenerating(true);
     setGenStatus("Starting generation...");
-
-    const es = api.generateImage(slug, prompt, strength);
-    genSourceRef.current = es;
-    api.listenSSE(
-      es,
-      (event: StreamEvent) => {
-        if (event.type === "progress" || event.type === "log") {
-          setGenStatus(event.type === "progress" ? event.message : (event as { line: string }).line);
-        } else if (event.type === "done") {
-          setGenerating(false);
-          setGenStatus("Image generated.");
-          api.getGeneratedImages(slug).then(({ images }) => setGenImages(images)).catch(() => {});
-        } else if (event.type === "error") {
-          setGenError(event.message);
-          setGenerating(false);
-        }
-      },
-      () => setGenerating(false)
-    );
+    genSSE.start(api.generateImage(slug, prompt, strength));
   };
 
   const animateImage = () => {
@@ -80,25 +89,7 @@ export function Step5Studio({ onAdvance }: Props) {
     setVidError("");
     setAnimating(true);
     setVidStatus("Starting video generation...");
-
-    const es = api.animateImage(slug, selectedImg.path, motionPrompt);
-    vidSourceRef.current = es;
-    api.listenSSE(
-      es,
-      (event: StreamEvent) => {
-        if (event.type === "progress" || event.type === "log") {
-          setVidStatus(event.type === "progress" ? event.message : (event as { line: string }).line);
-        } else if (event.type === "done") {
-          setAnimating(false);
-          setVidStatus("Video created.");
-          api.getVideos(slug).then(({ videos: vids }) => setVideos(vids)).catch(() => {});
-        } else if (event.type === "error") {
-          setVidError(event.message);
-          setAnimating(false);
-        }
-      },
-      () => setAnimating(false)
-    );
+    vidSSE.start(api.animateImage(slug, selectedImg.path, motionPrompt));
   };
 
   const openFolder = async (path: string) => {

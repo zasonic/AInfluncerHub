@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { useStore } from "../store";
 import * as api from "../api";
-import type { StreamEvent } from "../types";
+import { useAsyncOperation } from "../hooks/useAsyncOperation";
+import { useSSE } from "../hooks/useSSE";
 
 interface Props {
   onAdvance: () => void;
@@ -10,28 +11,53 @@ interface Props {
 export function Step4Training({ onAdvance }: Props) {
   const { activeProject, settings, refreshProject } = useStore();
 
-  const [hfToken,   setHfToken]   = useState(settings?.hf_token ?? "");
-  const [steps,     setSteps]     = useState(settings?.training_steps ?? 2000);
-  const [rank,      setRank]      = useState(settings?.lora_rank ?? 16);
-  const [lr,        setLr]        = useState(settings?.learning_rate ?? "1e-4");
-  const [logLines,  setLogLines]  = useState<{ text: string; type: "normal" | "error" | "warn" }[]>([]);
-  const [running,   setRunning]   = useState(false);
-  const [progress,  setProgress]  = useState(0);
-  const [status,    setStatus]    = useState("");
-  const [statusOk,  setStatusOk]  = useState(true);
-  const [done,      setDone]      = useState(false);
-  const [error,     setError]     = useState("");
+  const [hfToken,  setHfToken]  = useState(settings?.hf_token ?? "");
+  const [steps,    setSteps]    = useState(settings?.training_steps ?? 2000);
+  const [rank,     setRank]     = useState(settings?.lora_rank ?? 16);
+  const [lr,       setLr]       = useState(settings?.learning_rate ?? "1e-4");
+  const [logLines, setLogLines] = useState<{ text: string; type: "normal" | "error" | "warn" }[]>([]);
+  const [done,     setDone]     = useState(false);
 
-  const sourceRef  = useRef<EventSource | null>(null);
-  const logRef     = useRef<HTMLDivElement>(null);
-  const slug       = activeProject?.slug ?? "";
+  const logRef = useRef<HTMLDivElement>(null);
+  const slug   = activeProject?.slug ?? "";
 
-  // Check if already trained
+  const op  = useAsyncOperation();
+  const sse = useSSE({
+    onEvent: (event) => {
+      if (event.type === "log") {
+        const text = event.line;
+        const type: "normal" | "error" | "warn" = text.toLowerCase().includes("error") ? "error"
+          : text.toLowerCase().includes("warn")  ? "warn"
+          : "normal";
+        addLog(text, type);
+
+        const m = text.match(/(\d+)\s*\/\s*(\d+)/);
+        if (m) {
+          const total = Number(m[2]);
+          const doneCount = Number(m[1]);
+          if (total > 0 && doneCount >= 0 && doneCount <= total) {
+            op.setProgress(doneCount, total, text);
+          }
+        }
+      } else if (event.type === "done") {
+        setDone(true);
+        op.succeed("Training complete. LoRA saved.");
+        refreshProject(slug);
+        addLog("Training finished successfully.");
+      } else if (event.type === "error") {
+        op.fail(event.message);
+        addLog(event.message, "error");
+      }
+    },
+  });
+
+  const { running, progress, error, status, statusKind } = op.state;
+  const progressPct = progress.total > 0 ? progress.done / progress.total : 0;
+
   useEffect(() => {
     if (activeProject?.steps_done.includes(4)) setDone(true);
   }, [activeProject]);
 
-  // Auto-scroll log
   useEffect(() => {
     if (logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -42,64 +68,21 @@ export function Step4Training({ onAdvance }: Props) {
     setLogLines((prev) => [...prev.slice(-500), { text, type }]);
   };
 
-  const validate = (): string | null => {
-    if (!hfToken.trim()) return "HuggingFace token is required to download the training model.";
-    return null;
-  };
-
   const startTraining = () => {
-    const err = validate();
-    if (err) { setError(err); return; }
-    setError("");
-    setRunning(true);
+    if (!hfToken.trim()) {
+      op.fail("HuggingFace token is required to download the training model.");
+      return;
+    }
     setDone(false);
-    setProgress(0);
     setLogLines([]);
+    op.start(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`, steps);
     addLog(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`);
-
-    const es = api.startTraining(slug, hfToken.trim(), steps, rank, lr);
-    sourceRef.current = es;
-    api.listenSSE(
-      es,
-      (event: StreamEvent) => {
-        if (event.type === "log") {
-          const text = event.line;
-          const type = text.toLowerCase().includes("error") ? "error"
-            : text.toLowerCase().includes("warn")  ? "warn"
-            : "normal";
-          addLog(text, type);
-
-          // Parse step progress from log line e.g. "step: 120/2000"
-          const m = text.match(/(\d+)\s*\/\s*(\d+)/);
-          if (m) {
-            const pct = Number(m[1]) / Number(m[2]);
-            if (pct >= 0 && pct <= 1) setProgress(pct);
-          }
-        } else if (event.type === "done") {
-          setRunning(false);
-          setDone(true);
-          setProgress(1);
-          setStatus("Training complete. LoRA saved.");
-          setStatusOk(true);
-          refreshProject(slug);
-          addLog("Training finished successfully.");
-        } else if (event.type === "error") {
-          setRunning(false);
-          setStatus(event.message);
-          setStatusOk(false);
-          addLog(event.message, "error");
-        }
-      },
-      () => {
-        if (!done) setRunning(false);
-      }
-    );
+    sse.start(api.startTraining(slug, hfToken.trim(), steps, rank, lr));
   };
 
   const cancelTraining = () => {
-    sourceRef.current?.close();
+    sse.stop();
     api.cancelTraining(slug).catch(() => {});
-    setRunning(false);
     addLog("Training cancelled.");
   };
 
@@ -226,7 +209,7 @@ export function Step4Training({ onAdvance }: Props) {
             </div>
 
             <div className="progress-bar">
-              <div className="progress-fill" style={{ width: `${progress * 100}%` }} />
+              <div className="progress-fill" style={{ width: `${progressPct * 100}%` }} />
             </div>
 
             <div
@@ -248,7 +231,7 @@ export function Step4Training({ onAdvance }: Props) {
             </div>
 
             {status && (
-              <div className={`alert ${statusOk ? "alert-success" : "alert-error"}`}>
+              <div className={`alert ${statusKind === "ok" ? "alert-success" : "alert-error"}`}>
                 {status}
               </div>
             )}
@@ -262,7 +245,7 @@ export function Step4Training({ onAdvance }: Props) {
           <span className="text-sm text-muted">Step 4 of 5</span>
           {running && (
             <span className="text-xs text-muted">
-              {Math.round(progress * 100)}% complete
+              {Math.round(progressPct * 100)}% complete
             </span>
           )}
         </div>

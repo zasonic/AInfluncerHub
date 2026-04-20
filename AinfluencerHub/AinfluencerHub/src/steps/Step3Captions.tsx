@@ -1,30 +1,47 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useStore } from "../store";
 import * as api from "../api";
 import { ImageGallery } from "../components/ImageGallery";
-import type { StreamEvent, CaptionMap } from "../types";
+import { useAsyncOperation } from "../hooks/useAsyncOperation";
+import { useSSE } from "../hooks/useSSE";
+import type { CaptionMap } from "../types";
 
 interface Props {
   onAdvance: () => void;
 }
 
 export function Step3Captions({ onAdvance }: Props) {
-  const { activeProject, settings, refreshProject } = useStore();
+  const { activeProject, settings } = useStore();
 
-  const [images,      setImages]      = useState<{ path: string; filename: string }[]>([]);
-  const [captions,    setCaptions]    = useState<CaptionMap>({});
-  const [selected,    setSelected]    = useState<{ path: string; filename: string } | null>(null);
-  const [editText,    setEditText]    = useState("");
-  const [dirty,       setDirty]       = useState(false);
-  const [running,     setRunning]     = useState(false);
-  const [progress,    setProgress]    = useState({ done: 0, total: 0, message: "" });
-  const [status,      setStatus]      = useState("");
-  const [statusType,  setStatusType]  = useState<"ok" | "warn" | "error">("ok");
-  const [error,       setError]       = useState("");
-  const [captioner,   setCaptioner]   = useState<"florence2" | "joycaption">("florence2");
+  const [images,    setImages]    = useState<{ path: string; filename: string }[]>([]);
+  const [captions,  setCaptions]  = useState<CaptionMap>({});
+  const [selected,  setSelected]  = useState<{ path: string; filename: string } | null>(null);
+  const [editText,  setEditText]  = useState("");
+  const [dirty,     setDirty]     = useState(false);
+  const [captioner, setCaptioner] = useState<"florence2" | "joycaption">("florence2");
 
-  const sourceRef = useRef<EventSource | null>(null);
-  const slug      = activeProject?.slug ?? "";
+  const slug = activeProject?.slug ?? "";
+  const op   = useAsyncOperation();
+  const sse  = useSSE({
+    onEvent: (event) => {
+      if (event.type === "progress") {
+        op.setProgress(event.done, event.total, event.message);
+      } else if (event.type === "done") {
+        op.succeed("Auto-captioning complete.");
+        api.getCaptions(slug).then((caps) => {
+          setCaptions(caps);
+          if (selected) {
+            const stem = selected.filename.replace(/\.[^/.]+$/, "");
+            setEditText(caps[stem] ?? "");
+          }
+        }).catch(() => {});
+      } else if (event.type === "error") {
+        op.fail(event.message);
+      }
+    },
+  });
+
+  const { running, progress, error, status, statusKind } = op.state;
 
   useEffect(() => {
     if (!slug) return;
@@ -33,7 +50,6 @@ export function Step3Captions({ onAdvance }: Props) {
         setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })))
       ).catch(() => {});
     api.getCaptions(slug).then(setCaptions).catch(() => {});
-    return () => sourceRef.current?.close();
   }, [slug]);
 
   const selectImage = (img: { path: string; filename: string }) => {
@@ -52,58 +68,29 @@ export function Step3Captions({ onAdvance }: Props) {
       await api.updateCaption(slug, stem, editText);
     } catch { /* ignore */ }
     setDirty(false);
-    setStatus("Caption saved.");
-    setStatusType("ok");
+    op.setStatus("Caption saved.", "ok");
   };
 
   const runAutocaption = () => {
     if (!slug) return;
     const hf_token = settings?.hf_token ?? "";
-    setRunning(true);
-    setError("");
     const modelLabel = captioner === "joycaption" ? "JoyCaption" : "Florence2";
-    setProgress({ done: 0, total: images.length, message: `Loading ${modelLabel}...` });
-
-    const es = api.startCaptioning(slug, hf_token, captioner);
-    sourceRef.current = es;
-    api.listenSSE(
-      es,
-      (event: StreamEvent) => {
-        if (event.type === "progress") {
-          setProgress({ done: event.done, total: event.total, message: event.message });
-        } else if (event.type === "done") {
-          setRunning(false);
-          api.getCaptions(slug).then(setCaptions).catch(() => {});
-          setStatus("Auto-captioning complete.");
-          setStatusType("ok");
-          if (selected) {
-            const stem = selected.filename.replace(/\.[^/.]+$/, "");
-            api.getCaptions(slug).then((caps) => {
-              setEditText(caps[stem] ?? "");
-            }).catch(() => {});
-          }
-        } else if (event.type === "error") {
-          setError(event.message);
-          setRunning(false);
-        }
-      },
-      () => setRunning(false)
-    );
+    op.start(`Loading ${modelLabel}...`, images.length);
+    sse.start(api.startCaptioning(slug, hf_token, captioner));
   };
 
   const injectTrigger = async () => {
     try {
       const { updated } = await api.injectTrigger(slug);
-      await api.getCaptions(slug).then(setCaptions);
-      setStatus(`Trigger word added to ${updated} caption(s).`);
-      setStatusType("ok");
+      const caps = await api.getCaptions(slug);
+      setCaptions(caps);
+      op.setStatus(`Trigger word added to ${updated} caption(s).`, "ok");
       if (selected) {
         const stem = selected.filename.replace(/\.[^/.]+$/, "");
-        const caps = await api.getCaptions(slug);
         setEditText(caps[stem] ?? editText);
       }
     } catch (e) {
-      setError(String(e));
+      op.fail(String(e));
     }
   };
 
@@ -316,7 +303,7 @@ export function Step3Captions({ onAdvance }: Props) {
 
           {error  && <div className="alert alert-error">{error}</div>}
           {status && !error && (
-            <div className={`alert alert-${statusType === "ok" ? "success" : "warning"}`}>
+            <div className={`alert alert-${statusKind === "ok" ? "success" : statusKind === "error" ? "error" : "warning"}`}>
               {status}
             </div>
           )}

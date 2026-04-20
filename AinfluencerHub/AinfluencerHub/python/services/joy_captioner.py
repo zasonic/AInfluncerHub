@@ -9,8 +9,10 @@ Model: fancyfeast/llama-joycaption-beta-one-hf-llava (~17 GB bf16, ~10 GB 4-bit)
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+
+from services.models import JOY_CAPTIONER
 
 log = logging.getLogger("hub.joycaption")
 
@@ -18,7 +20,7 @@ _model = None
 _processor = None
 _device = None
 
-JOYCAPTION_MODEL_ID = "fancyfeast/llama-joycaption-beta-one-hf-llava"
+JOYCAPTION_MODEL_ID = JOY_CAPTIONER.repo_id
 
 # System prompt for training-style captions
 CAPTION_PROMPT = (

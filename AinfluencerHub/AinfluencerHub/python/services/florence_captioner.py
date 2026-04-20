@@ -10,8 +10,10 @@ Turbo / Flux models this is rich natural-language with trigger word.
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+
+from services.models import FLORENCE_CAPTIONER
 
 log = logging.getLogger("hub.captioner")
 
@@ -40,10 +42,10 @@ def _load_model(hf_token: str | None = None) -> None:
         kwargs["token"] = hf_token
 
     _model = AutoModelForCausalLM.from_pretrained(
-        "microsoft/Florence-2-large", **kwargs
+        FLORENCE_CAPTIONER.repo_id, **kwargs
     ).to(_device)
     _processor = AutoProcessor.from_pretrained(
-        "microsoft/Florence-2-large",
+        FLORENCE_CAPTIONER.repo_id,
         trust_remote_code=True,
         token=hf_token or None,
     )
