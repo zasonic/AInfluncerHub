@@ -1,9 +1,7 @@
 """
 services/video_pipeline.py — Native video generation using HuggingFace diffusers.
 
-Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
-Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
-
+Supports image-to-video generation using Wan2.1 I2V or CogVideoX as a fallback.
 All operations run locally on the user's GPU without external services.
 """
 
@@ -19,7 +17,6 @@ log = logging.getLogger("hub.video")
 WAN_MODEL_ID = WAN_VIDEO.repo_id
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
 
-# Lazy global
 _pipeline = None
 _pipeline_type = None
 
@@ -34,12 +31,11 @@ def _get_device_and_dtype():
 
 
 def _load_pipeline(model_id: str = "", hf_token: str = ""):
-    """Load the video generation pipeline."""
+    """Load the image-to-video pipeline with fallback chain."""
     global _pipeline, _pipeline_type
 
     if _pipeline is not None:
         return
-
 
     device, dtype = _get_device_and_dtype()
 
@@ -60,15 +56,26 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
         )
         _pipeline_type = "cogvideo"
     else:
-        # Wan2.1 pipeline
-        from diffusers import AutoPipelineForVideoGeneration
+        try:
+            from diffusers import WanImageToVideoPipeline
 
-        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
-            model_id, **kwargs
-        )
-        _pipeline_type = "wan"
+            _pipeline = WanImageToVideoPipeline.from_pretrained(
+                model_id, **kwargs
+            )
+            _pipeline_type = "wan_i2v"
+        except Exception as exc:
+            log.warning(
+                "WanImageToVideoPipeline not available (%s), "
+                "falling back to CogVideoX",
+                exc,
+            )
+            from diffusers import CogVideoXImageToVideoPipeline
 
-    # Enable CPU offloading for large models
+            _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(
+                COGVIDEO_MODEL_ID, **kwargs
+            )
+            _pipeline_type = "cogvideo"
+
     if device == "cuda":
         _pipeline.enable_model_cpu_offload()
     else:
@@ -108,18 +115,6 @@ def generate_video(
     """
     Generate a video from a still image.
 
-    Args:
-        image_path:   Source image to animate.
-        prompt:       Motion/scene description.
-        output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
-        hf_token:     HuggingFace token for model download.
-        num_frames:   Number of video frames to generate.
-        steps:        Diffusion inference steps.
-        cfg:          Guidance scale.
-        seed:         Random seed (-1 for random).
-        progress_cb:  Callback for status messages.
-
     Returns:
         Path to the generated video, or None on failure.
     """
@@ -137,9 +132,12 @@ def generate_video(
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
         source = Image.open(image_path).convert("RGB")
-        source = source.resize((832, 480), Image.LANCZOS)
+
+        if _pipeline_type == "cogvideo":
+            source = source.resize((720, 480), Image.LANCZOS)
+        else:
+            source = source.resize((832, 480), Image.LANCZOS)
 
         if seed < 0:
             seed = random.randint(0, 2**32 - 1)
@@ -158,7 +156,6 @@ def generate_video(
             generator=generator,
         )
 
-        # Export frames to video
         if progress_cb:
             progress_cb("Saving video...")
 

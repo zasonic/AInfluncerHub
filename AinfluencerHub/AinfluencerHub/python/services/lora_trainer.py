@@ -21,6 +21,28 @@ log = logging.getLogger("hub.trainer")
 
 BASE_MODEL_ID = SDXL_BASE.repo_id
 
+MIN_SNR_GAMMA = 5.0
+
+
+def _compute_snr(timesteps, noise_scheduler):
+    """
+    Compute signal-to-noise ratio for given timesteps.
+    Used by Min-SNR weighting (Hang et al., ICCV 2023) to reduce
+    conflicting gradients between high-noise and low-noise timesteps.
+    """
+    import torch
+
+    alphas_cumprod = noise_scheduler.alphas_cumprod.to(
+        device=timesteps.device, dtype=torch.float32
+    )
+    sqrt_alphas_cumprod = alphas_cumprod.sqrt()
+    sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
+
+    alpha = sqrt_alphas_cumprod[timesteps]
+    sigma = sqrt_one_minus_alphas_cumprod[timesteps]
+    snr = (alpha / sigma) ** 2
+    return snr
+
 
 def prepare_training_folder(
     dataset_dir: Path,
@@ -293,8 +315,17 @@ def run_training(
             added_cond_kwargs=added_cond_kwargs,
         ).sample
 
-        # Loss (predict noise)
-        loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+        # Loss with Min-SNR weighting (Hang et al., ICCV 2023, gamma=5)
+        # Reduces conflicting gradients across timesteps for ~3.4x faster
+        # convergence and better quality on small datasets.
+        loss = F.mse_loss(model_pred.float(), noise.float(), reduction="none")
+        loss = loss.mean(dim=list(range(1, loss.ndim)))
+        try:
+            snr = _compute_snr(timesteps, noise_scheduler)
+            min_snr_weight = torch.clamp(snr, max=MIN_SNR_GAMMA) / snr
+            loss = (loss * min_snr_weight).mean()
+        except Exception:
+            loss = loss.mean()
         loss = loss / gradient_accumulation_steps
         loss.backward()
 

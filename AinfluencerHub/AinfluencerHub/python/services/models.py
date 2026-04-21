@@ -55,14 +55,14 @@ JOY_CAPTIONER = ModelSpec(
 )
 
 WAN_VIDEO = ModelSpec(
-    repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
+    repo_id="Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
     purpose="Image-to-video animation (Step 5)",
     size_gb=28.0,
     required=False,
 )
 
 COGVIDEO = ModelSpec(
-    repo_id="THUDM/CogVideoX-5b-I2V",
+    repo_id="THUDM/CogVideoX1.5-5B-I2V",
     purpose="Fallback image-to-video model (Step 5)",
     size_gb=10.0,
     required=False,
