@@ -7,6 +7,14 @@ with a fully native training loop.
 
 Training produces .safetensors LoRA weights that are directly loadable
 by the diffusion_pipeline for inference.
+
+Enhancements:
+  - Prodigy optimizer: adaptive LR eliminates manual learning-rate tuning.
+    Falls back to AdamW8bit/AdamW when prodigy-optim is not installed.
+  - DoRA (Weight-Decomposed LoRA): ~5-10% quality improvement at same rank.
+    Falls back to standard LoRA when the installed peft version lacks DoRA.
+  - Min-SNR gamma weighting: improves training convergence by down-weighting
+    high-noise timesteps. Based on Hang et al. 2023 (arXiv:2303.09556).
 """
 
 import logging
@@ -46,10 +54,20 @@ def run_training(
     hf_token: str = "",
     log_cb: Callable[[str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    use_dora: bool = True,
+    optimizer_type: str = "auto",
+    snr_gamma: float = 5.0,
 ) -> tuple[bool, str]:
     """
     Train a LoRA adapter on the SDXL UNet using the user's image-caption
     dataset.
+
+    Args:
+        use_dora:       Use DoRA (weight-decomposed LoRA) for better quality.
+                        Falls back to standard LoRA if peft version lacks support.
+        optimizer_type: "auto" (Prodigy > AdamW8bit > AdamW), "prodigy",
+                        "adamw8bit", or "adamw".
+        snr_gamma:      Min-SNR gamma for loss weighting (0 to disable).
 
     Returns (success, message).
     """
@@ -74,8 +92,6 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────
-
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
     pairs: list[tuple[Path, str]] = []
@@ -92,8 +108,6 @@ def run_training(
         return False, f"No image-caption pairs found in {dataset_dir}"
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
-
-    # ── Step 2: Load model components ────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -131,26 +145,34 @@ def run_training(
 
     _emit("Model loaded. Configuring LoRA...")
 
-    # Freeze base model
     text_encoder_1.requires_grad_(False)
     text_encoder_2.requires_grad_(False)
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────
-
     from peft import LoraConfig, get_peft_model
 
-    lora_config = LoraConfig(
-        r=rank,
-        lora_alpha=rank,
-        init_lora_weights="gaussian",
-        target_modules=[
+    lora_kwargs: dict = {
+        "r": rank,
+        "lora_alpha": rank,
+        "init_lora_weights": "gaussian",
+        "target_modules": [
             "to_k", "to_q", "to_v", "to_out.0",
             "proj_in", "proj_out",
             "ff.net.0.proj", "ff.net.2",
         ],
-    )
+    }
+
+    if use_dora:
+        try:
+            lora_kwargs["use_dora"] = True
+            test_cfg = LoraConfig(**lora_kwargs)
+            _emit("DoRA enabled (weight-decomposed LoRA — better quality at same rank).")
+        except TypeError:
+            del lora_kwargs["use_dora"]
+            _emit("DoRA not available in this peft version — using standard LoRA.")
+
+    lora_config = LoraConfig(**lora_kwargs)
     unet = get_peft_model(unet, lora_config)
     unet.train()
 
@@ -158,10 +180,7 @@ def run_training(
     total_params = sum(p.numel() for p in unet.parameters())
     _emit(f"LoRA: {trainable_params:,} trainable params / {total_params:,} total ({100 * trainable_params / total_params:.2f}%)")
 
-    # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
-
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -204,32 +223,68 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────
+    use_prodigy = False
+    if optimizer_type in ("auto", "prodigy"):
+        try:
+            from prodigyopt import Prodigy
+            optimizer = Prodigy(
+                unet.parameters(),
+                lr=1.0,
+                d_coef=1.0,
+                weight_decay=0.01,
+                use_bias_correction=True,
+                safeguard_warmup=True,
+            )
+            use_prodigy = True
+            _emit("Using Prodigy optimizer (adaptive LR — no manual tuning needed).")
+        except ImportError:
+            if optimizer_type == "prodigy":
+                _emit("prodigy-optim not installed — falling back to AdamW.")
 
-    try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(
-            unet.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-2,
-        )
-        _emit("Using AdamW8bit optimizer.")
-    except ImportError:
+    if not use_prodigy and optimizer_type in ("auto", "adamw8bit"):
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using AdamW8bit optimizer.")
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+
+    if not use_prodigy and optimizer_type == "adamw":
         optimizer = torch.optim.AdamW(
             unet.parameters(),
             lr=learning_rate,
             weight_decay=1e-2,
         )
-        _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+        _emit("Using standard AdamW optimizer.")
 
-    # Cosine LR scheduler with warmup
     warmup_steps = max(50, steps // 20)
     from torch.optim.lr_scheduler import CosineAnnealingLR
-    scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    if use_prodigy:
+        scheduler = CosineAnnealingLR(optimizer, T_max=steps, eta_min=0.0)
+    else:
+        scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ────────────────────────────────────────────
+    def _compute_snr(timesteps_t):
+        alphas_cumprod = noise_scheduler.alphas_cumprod.to(device=timesteps_t.device)
+        sqrt_alphas_cumprod = alphas_cumprod[timesteps_t] ** 0.5
+        sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod[timesteps_t]) ** 0.5
+        snr = (sqrt_alphas_cumprod / sqrt_one_minus_alphas_cumprod) ** 2
+        return snr
 
-    _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
+    lr_label = "adaptive" if use_prodigy else str(learning_rate)
+    _emit(f"Starting training: {steps} steps, rank {rank}, lr {lr_label}")
+    if snr_gamma > 0:
+        _emit(f"Min-SNR gamma weighting enabled (gamma={snr_gamma}).")
+
     gradient_accumulation_steps = 4
     global_step = 0
     running_loss = 0.0
@@ -243,7 +298,6 @@ def run_training(
             _cleanup(unet, vae, text_encoder_1, text_encoder_2)
             return False, "Training cancelled by user."
 
-        # Get next batch (cycle through dataset)
         try:
             batch = next(data_iter)
         except StopIteration:
@@ -254,23 +308,18 @@ def run_training(
         input_ids_1 = batch["input_ids_1"].to(device)
         input_ids_2 = batch["input_ids_2"].to(device)
 
-        # Encode images to latents
         with torch.no_grad():
             latents = vae.encode(pixel_values).latent_dist.sample()
             latents = latents * vae.config.scaling_factor
 
-        # Encode text
         with torch.no_grad():
             encoder_output_1 = text_encoder_1(input_ids_1, output_hidden_states=True)
             encoder_output_2 = text_encoder_2(input_ids_2, output_hidden_states=True)
-            # SDXL uses penultimate hidden states
             text_embeds_1 = encoder_output_1.hidden_states[-2]
             text_embeds_2 = encoder_output_2.hidden_states[-2]
             prompt_embeds = torch.cat([text_embeds_1, text_embeds_2], dim=-1)
-            # Pooled output from text_encoder_2
             pooled_prompt_embeds = encoder_output_2[0]
 
-        # Add noise
         noise = torch.randn_like(latents)
         timesteps = torch.randint(
             0, noise_scheduler.config.num_train_timesteps,
@@ -278,7 +327,6 @@ def run_training(
         ).long()
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-        # Time IDs for SDXL (original_size + crop_coords + target_size)
         add_time_ids = torch.tensor(
             [[1024, 1024, 0, 0, 1024, 1024]], dtype=weight_dtype, device=device,
         )
@@ -287,56 +335,54 @@ def run_training(
             "time_ids": add_time_ids,
         }
 
-        # Forward pass
         model_pred = unet(
             noisy_latents, timesteps, prompt_embeds,
             added_cond_kwargs=added_cond_kwargs,
         ).sample
 
-        # Loss (predict noise)
-        loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+        if snr_gamma > 0:
+            snr = _compute_snr(timesteps)
+            mse_loss_weights = torch.clamp(snr, max=snr_gamma) / snr
+            loss = F.mse_loss(model_pred.float(), noise.float(), reduction="none")
+            loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
+            loss = loss.mean()
+        else:
+            loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
         loss = loss / gradient_accumulation_steps
         loss.backward()
 
         running_loss += loss.item() * gradient_accumulation_steps
         global_step += 1
 
-        # Gradient accumulation step
         if global_step % gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(unet.parameters(), 1.0)
             optimizer.step()
-            if global_step > warmup_steps:
+            if use_prodigy or global_step > warmup_steps:
                 scheduler.step()
             optimizer.zero_grad()
 
-        # Warmup (linear)
-        if global_step <= warmup_steps:
+        if not use_prodigy and global_step <= warmup_steps:
             warmup_lr = learning_rate * (global_step / warmup_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
 
-        # Logging
         if global_step % 10 == 0 or global_step == 1:
             avg_loss = running_loss / 10 if global_step > 10 else running_loss
             running_loss = 0.0
             current_lr = optimizer.param_groups[0]["lr"]
             _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
 
-        # Save checkpoint
         if global_step % save_every == 0 and global_step < steps:
             ckpt_path = output_dir / f"checkpoint-{global_step}"
             ckpt_path.mkdir(parents=True, exist_ok=True)
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────
-
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"
     final_path.mkdir(parents=True, exist_ok=True)
     unet.save_pretrained(final_path)
 
-    # Also save as a single safetensors file for easy loading
     try:
         from peft.utils import get_peft_model_state_dict
         from safetensors.torch import save_file
