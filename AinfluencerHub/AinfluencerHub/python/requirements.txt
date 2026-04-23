@@ -16,10 +16,13 @@ transformers>=4.51.0,<5.0.0
 huggingface_hub>=0.23.0,<1.0.0
 safetensors>=0.4.2,<1.0.0
 accelerate>=0.30.0,<2.0.0
-peft>=0.10.0,<1.0.0
+peft>=0.12.0,<1.0.0
 bitsandbytes>=0.43.0,<1.0.0
 torch>=2.1.0,<3.0.0
 torchvision>=0.16.0,<1.0.0
+
+# Training optimizer (optional — falls back to AdamW if absent)
+prodigy-optim>=1.0,<2.0.0
 
 # Face-consistent generation (IP-Adapter)
 insightface>=0.7.3,<1.0.0
