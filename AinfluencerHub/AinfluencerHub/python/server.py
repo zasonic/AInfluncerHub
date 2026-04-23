@@ -30,7 +30,6 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-# Ensure python/ is importable as the root package path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
@@ -43,18 +42,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("hub.server")
 
-# ── Global singletons ─────────────────────────────────────────────────────────
-
 settings = Settings()
 
-# GPU lock — one task at a time on 16 GB VRAM
 _gpu_lock = threading.Lock()
 
-# Per-project training cancel events
 _cancel_lock = threading.Lock()
 _cancel_events: dict[str, threading.Event] = {}
-
-# ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="AinfluencerHub", version="2.0.0")
 app.add_middleware(
@@ -64,22 +57,12 @@ app.add_middleware(
     allow_headers  = ["*"],
 )
 
-# ── SSE helpers ───────────────────────────────────────────────────────────────
 
 def _sse_event(data: dict) -> dict:
     return {"data": json.dumps(data)}
 
 
 class SSEQueue:
-    """
-    Thread-safe queue with async drain semantics.
-
-    Worker threads push via `put()`; the FastAPI endpoint awaits items via the
-    async generator returned by `drain()`. Items push from any thread — pushes
-    are bounced through the running event loop so the awaiter wakes up
-    immediately without polling.
-    """
-
     def __init__(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -96,23 +79,19 @@ class SSEQueue:
 
 
 def _drain_queue(q: SSEQueue) -> AsyncGenerator[dict, None]:
-    """Legacy-compatible alias so existing callers keep working."""
     return q.drain()
 
-# ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# ── Preflight ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/preflight")
 def preflight():
     from services.preflight import run_all
     return run_all(settings)
 
-# ── Projects ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/projects")
 def list_projects():
@@ -159,7 +138,6 @@ async def upload_references(slug: str, files: list[UploadFile] = File(...)):
         count += 1
     return {"count": count}
 
-# ── Dataset ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/dataset/{slug}/images")
 def get_dataset_images(slug: str):
@@ -185,10 +163,7 @@ async def upload_dataset(slug: str, files: list[UploadFile] = File(...)):
 
 
 @app.get("/api/dataset/{slug}/generate")
-async def generate_dataset_images(
-    slug:  str,
-    count: int = Query(25),
-):
+async def generate_dataset_images(slug: str, count: int = Query(25)):
     """Generate face-consistent dataset images using native diffusers pipeline."""
     proj = _load_project(slug)
     refs = proj.reference_images()
@@ -213,10 +188,8 @@ async def generate_dataset_images(
             from services.diffusion_pipeline import generate_dataset
             hf_token = settings.get("hf_token", "")
             generate_dataset(
-                reference_image=refs[0],
-                prompts=prompts,
-                trigger_word=proj.trigger_word,
-                output_dir=proj.dataset_dir,
+                reference_image=refs[0], prompts=prompts,
+                trigger_word=proj.trigger_word, output_dir=proj.dataset_dir,
                 hf_token=hf_token,
                 progress_cb=lambda done, total, msg: q.put(
                     {"type": "progress", "done": done, "total": total, "message": msg}
@@ -244,7 +217,6 @@ def score_dataset(slug: str):
     passed = [r for r in results if r["passed"]]
     return {"scores": results, "passed": len(passed), "total": len(results)}
 
-# ── Captions ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/captions/{slug}")
 def get_captions(slug: str):
@@ -252,7 +224,6 @@ def get_captions(slug: str):
     result: dict[str, str] = {}
     for txt in proj.captions_dir.glob("*.txt"):
         result[txt.stem] = txt.read_text(encoding="utf-8").strip()
-    # Also pick up any .txt files sitting beside dataset images
     for txt in proj.dataset_dir.glob("*.txt"):
         if txt.stem not in result:
             result[txt.stem] = txt.read_text(encoding="utf-8").strip()
@@ -291,16 +262,11 @@ def inject_trigger(slug: str):
 
 
 @app.get("/api/captions/{slug}/run")
-async def run_captioning(
-    slug:     str,
-    hf_token: str = Query(""),
-    captioner: str = Query("florence2"),
-):
+async def run_captioning(slug: str, hf_token: str = Query(""), captioner: str = Query("florence2")):
     proj   = _load_project(slug)
     images = proj.dataset_images()
     if not images:
         raise HTTPException(400, "No dataset images found.")
-
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy. Try again shortly.")
 
@@ -316,14 +282,12 @@ async def run_captioning(
             else:
                 from services.florence_captioner import caption_batch
             caption_batch(
-                image_paths=images,
-                trigger_word=proj.trigger_word,
+                image_paths=images, trigger_word=proj.trigger_word,
                 hf_token=hf_token or None,
                 progress_cb=lambda done, total, msg: q.put(
                     {"type": "progress", "done": done, "total": total, "message": msg}
                 ),
-                cancel_event=cancel,
-                captions_dir=proj.captions_dir,
+                cancel_event=cancel, captions_dir=proj.captions_dir,
             )
             q.put({"type": "done", "message": "Captioning complete."})
         except Exception as exc:
@@ -334,17 +298,28 @@ async def run_captioning(
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
 
-# ── Training ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/training/{slug}/start")
 async def start_training(
-    slug:     str,
-    hf_token: str = Query(""),
-    steps:    int = Query(2000),
-    rank:     int = Query(16),
-    lr:       str = Query("1e-4"),
+    slug:      str,
+    hf_token:  str   = Query(""),
+    steps:     int   = Query(2000),
+    rank:      int   = Query(16),
+    lr:        str   = Query("1e-4"),
+    use_dora:  bool  = Query(True),
+    optimizer: str   = Query("auto"),
+    snr_gamma: float = Query(5.0),
 ):
-    """Start native LoRA training using diffusers + peft."""
+    """Start native LoRA training using diffusers + peft.
+
+    New parameters:
+        use_dora:   Enable DoRA (weight-decomposed LoRA) for ~5-10% better
+                    quality at the same rank. Defaults to True; falls back
+                    to standard LoRA if the installed peft lacks DoRA.
+        optimizer:  "auto" tries Prodigy > AdamW8bit > AdamW. Prodigy uses
+                    adaptive LR so the lr parameter is ignored.
+        snr_gamma:  Min-SNR gamma for loss weighting (0 to disable).
+    """
     proj = _load_project(slug)
     if not hf_token.strip():
         raise HTTPException(400, "hf_token is required.")
@@ -356,40 +331,27 @@ async def start_training(
     with _cancel_lock:
         _cancel_events[slug] = cancel
 
-    # Save settings for next time
     settings.update({
-        "hf_token":        hf_token,
-        "training_steps":  steps,
-        "lora_rank":       rank,
-        "learning_rate":   lr,
+        "hf_token": hf_token, "training_steps": steps,
+        "lora_rank": rank, "learning_rate": lr,
+        "use_dora": use_dora, "optimizer": optimizer, "snr_gamma": snr_gamma,
     })
 
     def _run():
         try:
             from services.lora_trainer import prepare_training_folder, run_training
-
             prepare_training_folder(proj.dataset_dir, proj.captions_dir)
-
             q.put({"type": "log", "line": f"Starting training: {steps} steps, rank {rank}, lr {lr}"})
-
             success, message = run_training(
-                dataset_dir=proj.dataset_dir,
-                output_dir=proj.lora_dir,
-                trigger_word=proj.trigger_word,
-                steps=steps,
-                rank=rank,
-                learning_rate=float(lr),
-                hf_token=hf_token,
+                dataset_dir=proj.dataset_dir, output_dir=proj.lora_dir,
+                trigger_word=proj.trigger_word, steps=steps, rank=rank,
+                learning_rate=float(lr), hf_token=hf_token,
                 log_cb=lambda line: q.put({"type": "log", "line": line}),
                 cancel_event=cancel,
+                use_dora=use_dora, optimizer_type=optimizer, snr_gamma=snr_gamma,
             )
-
             if success:
-                loras = sorted(
-                    proj.lora_dir.glob("**/*.safetensors"),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
-                )
+                loras = sorted(proj.lora_dir.glob("**/*.safetensors"), key=lambda p: p.stat().st_mtime, reverse=True)
                 lora_path = str(loras[0]) if loras else message
                 proj.set("lora_path", lora_path)
                 proj.mark_step_done(4)
@@ -414,52 +376,34 @@ def cancel_training(slug: str):
         ev.set()
     return {"ok": True}
 
-# ── Model management ─────────────────────────────────────────────────────────
 
 @app.get("/api/models/status")
 def get_model_status():
-    """Report which models are downloaded and their sizes."""
     from services.model_manager import get_all_model_status
     return get_all_model_status()
 
 
 @app.get("/api/models/download")
 async def download_model(model_hf_id: str = Query("")):
-    """Download a model from HuggingFace Hub with SSE progress."""
     if not model_hf_id.strip():
         raise HTTPException(400, "model_hf_id is required.")
-
     q = SSEQueue()
 
     def _run():
         from services.model_manager import download_model as _download
         hf_token = settings.get("hf_token", "")
-        ok, msg = _download(
-            model_hf_id.strip(),
-            hf_token=hf_token,
-            progress_cb=lambda m: q.put({"type": "log", "line": m}),
-        )
-        if ok:
-            q.put({"type": "done", "message": msg})
-        else:
-            q.put({"type": "error", "message": msg})
+        ok, msg = _download(model_hf_id.strip(), hf_token=hf_token, progress_cb=lambda m: q.put({"type": "log", "line": m}))
+        q.put({"type": "done", "message": msg} if ok else {"type": "error", "message": msg})
 
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
 
-# ── Studio — image generation ─────────────────────────────────────────────────
 
 @app.get("/api/studio/{slug}/generate")
-async def generate_image(
-    slug:          str,
-    prompt:        str   = Query(""),
-    lora_strength: float = Query(0.85),
-):
-    """Generate an image using native diffusers pipeline with optional LoRA."""
+async def generate_image(slug: str, prompt: str = Query(""), lora_strength: float = Query(0.85)):
     proj = _load_project(slug)
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
-
     q = SSEQueue()
 
     def _run():
@@ -469,14 +413,9 @@ async def generate_image(
             hf_token = settings.get("hf_token", "")
             q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting generation..."})
             paths = _generate(
-                positive_prompt=prompt,
-                lora_path=str(lora) if lora else "",
-                lora_strength=lora_strength,
-                output_dir=proj.generated_dir,
-                hf_token=hf_token,
-                progress_cb=lambda msg: q.put(
-                    {"type": "progress", "done": 0, "total": 1, "message": msg}
-                ),
+                positive_prompt=prompt, lora_path=str(lora) if lora else "",
+                lora_strength=lora_strength, output_dir=proj.generated_dir, hf_token=hf_token,
+                progress_cb=lambda msg: q.put({"type": "progress", "done": 0, "total": 1, "message": msg}),
             )
             q.put({"type": "done", "message": "Image generated.", "payload": {"paths": [str(p) for p in paths]}})
         except Exception as exc:
@@ -490,39 +429,19 @@ async def generate_image(
 
 @app.get("/api/studio/{slug}/images")
 def get_generated_images(slug: str):
-    proj  = _load_project(slug)
-    exts  = {".jpg", ".jpeg", ".png", ".webp"}
-    imgs  = sorted(
-        [p for p in proj.generated_dir.iterdir() if p.suffix.lower() in exts],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return {
-        "images": [
-            {
-                "path":     str(img),
-                "filename": img.name,
-                "url":      f"/api/files/image?path={img}",
-            }
-            for img in imgs
-        ]
-    }
+    proj = _load_project(slug)
+    exts = {".jpg", ".jpeg", ".png", ".webp"}
+    imgs = sorted([p for p in proj.generated_dir.iterdir() if p.suffix.lower() in exts], key=lambda p: p.stat().st_mtime, reverse=True)
+    return {"images": [{"path": str(img), "filename": img.name, "url": f"/api/files/image?path={img}"} for img in imgs]}
 
-# ── Studio — video ────────────────────────────────────────────────────────────
 
 @app.get("/api/studio/{slug}/animate")
-async def animate_image(
-    slug:          str,
-    image_path:    str = Query(""),
-    motion_prompt: str = Query(""),
-):
-    """Generate a video from a still image using native diffusers pipeline."""
+async def animate_image(slug: str, image_path: str = Query(""), motion_prompt: str = Query("")):
     proj = _load_project(slug)
     if not image_path:
         raise HTTPException(400, "image_path is required.")
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
-
     q = SSEQueue()
 
     def _run():
@@ -531,16 +450,11 @@ async def animate_image(
             hf_token = settings.get("hf_token", "")
             q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting video generation..."})
             video = generate_video(
-                image_path=Path(image_path),
-                prompt=motion_prompt,
-                output_dir=proj.videos_dir,
-                hf_token=hf_token,
-                progress_cb=lambda m: q.put(
-                    {"type": "progress", "done": 0, "total": 1, "message": m}
-                ),
+                image_path=Path(image_path), prompt=motion_prompt,
+                output_dir=proj.videos_dir, hf_token=hf_token,
+                progress_cb=lambda m: q.put({"type": "progress", "done": 0, "total": 1, "message": m}),
             )
-            q.put({"type": "done", "message": "Video created.",
-                   "payload": {"path": str(video) if video else ""}})
+            q.put({"type": "done", "message": "Video created.", "payload": {"path": str(video) if video else ""}})
         except Exception as exc:
             q.put({"type": "error", "message": str(exc)})
         finally:
@@ -553,16 +467,9 @@ async def animate_image(
 @app.get("/api/studio/{slug}/videos")
 def get_videos(slug: str):
     proj = _load_project(slug)
-    vids = sorted(
-        proj.videos_dir.glob("*.mp4"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return {
-        "videos": [{"path": str(v), "filename": v.name} for v in vids]
-    }
+    vids = sorted(proj.videos_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return {"videos": [{"path": str(v), "filename": v.name} for v in vids]}
 
-# ── Settings ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/settings")
 def get_settings():
@@ -574,7 +481,6 @@ def update_settings(body: dict):
     settings.update(body)
     return {"ok": True}
 
-# ── File serving ──────────────────────────────────────────────────────────────
 
 @app.get("/api/files/image")
 def serve_image(path: str = Query(...)):
@@ -586,7 +492,6 @@ def serve_image(path: str = Query(...)):
         raise HTTPException(404, "Image not found.")
     return FileResponse(p)
 
-# ── Internal helper ───────────────────────────────────────────────────────────
 
 def _load_project(slug: str) -> Project:
     output_dir = settings.resolve_output_dir()
@@ -596,18 +501,11 @@ def _load_project(slug: str) -> Project:
     except FileNotFoundError as exc:
         raise HTTPException(404, f"Project '{slug}' not found.") from exc
 
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", type=str, default="127.0.0.1")
     args = parser.parse_args()
-
     log.info("AinfluencerHub backend starting on %s:%d", args.host, args.port)
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="warning",   # suppress access log spam
-    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
