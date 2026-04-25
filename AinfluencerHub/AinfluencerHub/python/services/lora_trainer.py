@@ -7,6 +7,17 @@ with a fully native training loop.
 
 Training produces .safetensors LoRA weights that are directly loadable
 by the diffusion_pipeline for inference.
+
+v2.1 training improvements:
+  DoRA  — Weight-Decomposed Low-Rank Adaptation (Liu et al., ICLR 2024).
+            Decomposes LoRA updates into magnitude + direction components for
+            better gradient flow and sharper face identity. Enabled when
+            peft >= 0.9.0; falls back to standard LoRA silently.
+  MinSNR — Signal-to-noise ratio weighted loss (Hang et al. 2023 / CVPR 2024).
+            Prevents high-noise timesteps from dominating training. Produces
+            sharper detail and more consistent results without extra steps.
+            gamma=5.0 (published optimal default). Falls back to standard MSE
+            loss on any exception so training is never interrupted.
 """
 
 import logging
@@ -74,7 +85,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────
+    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -93,7 +104,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ────────────────────────────────────
+    # ── Step 2: Load model components ──────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -137,11 +148,11 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
-    lora_config = LoraConfig(
+    _lora_base_kwargs = dict(
         r=rank,
         lora_alpha=rank,
         init_lora_weights="gaussian",
@@ -151,6 +162,17 @@ def run_training(
             "ff.net.0.proj", "ff.net.2",
         ],
     )
+
+    # DoRA (Liu et al., ICLR 2024): decomposes LoRA updates into magnitude +
+    # direction components, improving gradient flow and face-identity sharpness.
+    # Requires peft >= 0.9.0; older installs fall back to standard LoRA.
+    try:
+        lora_config = LoraConfig(**_lora_base_kwargs, use_dora=True)
+        _emit("LoRA adapter: DoRA enabled (Weight-Decomposed, peft>=0.9.0) — improved identity consistency")
+    except TypeError:
+        lora_config = LoraConfig(**_lora_base_kwargs)
+        _emit("LoRA adapter: standard LoRA (upgrade peft>=0.9.0 to enable DoRA for better results)")
+
     unet = get_peft_model(unet, lora_config)
     unet.train()
 
@@ -161,7 +183,7 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────
+    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -204,7 +226,7 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -227,9 +249,15 @@ def run_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ────────────────────────────────────────────
+    # ── Step 6: Training loop ───────────────────────────────────────────────────────────
 
     _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
+
+    # Pre-compute alphas_cumprod for MinSNR-gamma weighting (done once, not per step)
+    _alphas_cumprod_dev = noise_scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)
+    _snr_gamma = 5.0  # published optimal default (Hang et al. 2023)
+    _emit(f"Loss: MinSNR-γ weighted (gamma={_snr_gamma}) — balances timestep contributions")
+
     gradient_accumulation_steps = 4
     global_step = 0
     running_loss = 0.0
@@ -293,8 +321,28 @@ def run_training(
             added_cond_kwargs=added_cond_kwargs,
         ).sample
 
-        # Loss (predict noise)
-        loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+        # MinSNR-gamma weighted loss (Hang et al. 2023, gamma=5.0).
+        # SNR(t) = alpha_t^2 / sigma_t^2 = alphas_cumprod[t] / (1 - alphas_cumprod[t]).
+        # Per-step weight = min(SNR, gamma) / SNR, clipping the loss contribution of
+        # high-noise (low-SNR) timesteps that would otherwise dominate training.
+        # Falls back to plain MSE on any error so training is never interrupted.
+        try:
+            _snr = (
+                _alphas_cumprod_dev[timesteps]
+                / (1.0 - _alphas_cumprod_dev[timesteps]).clamp(min=1e-6)
+            ).clamp(min=1e-6)
+            _weights = (
+                torch.stack([_snr, _snr_gamma * torch.ones_like(_snr)], dim=1)
+                .min(dim=1)[0]
+                / _snr
+            )
+            loss = (
+                F.mse_loss(model_pred.float(), noise.float(), reduction="none")
+                .mean([1, 2, 3]) * _weights
+            ).mean()
+        except Exception:
+            loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+
         loss = loss / gradient_accumulation_steps
         loss.backward()
 
@@ -329,7 +377,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────
+    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"
