@@ -304,6 +304,9 @@ async def run_captioning(
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy. Try again shortly.")
 
+    # Prefer token from saved settings; fall back to query param for backwards compat
+    resolved_token = hf_token.strip() or settings.get("hf_token", "")
+
     q      = SSEQueue()
     cancel = threading.Event()
     with _cancel_lock:
@@ -318,7 +321,7 @@ async def run_captioning(
             caption_batch(
                 image_paths=images,
                 trigger_word=proj.trigger_word,
-                hf_token=hf_token or None,
+                hf_token=resolved_token or None,
                 progress_cb=lambda done, total, msg: q.put(
                     {"type": "progress", "done": done, "total": total, "message": msg}
                 ),
@@ -346,8 +349,10 @@ async def start_training(
 ):
     """Start native LoRA training using diffusers + peft."""
     proj = _load_project(slug)
-    if not hf_token.strip():
-        raise HTTPException(400, "hf_token is required.")
+    # Prefer token from saved settings; fall back to query param for backwards compat
+    resolved_token = hf_token.strip() or settings.get("hf_token", "")
+    if not resolved_token:
+        raise HTTPException(400, "hf_token is required. Set it in Settings first.")
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy. Wait for the current task to finish.")
 
@@ -356,9 +361,9 @@ async def start_training(
     with _cancel_lock:
         _cancel_events[slug] = cancel
 
-    # Save settings for next time
+    # Save settings for next time (store resolved token, never log it)
     settings.update({
-        "hf_token":        hf_token,
+        "hf_token":        resolved_token,
         "training_steps":  steps,
         "lora_rank":       rank,
         "learning_rate":   lr,
@@ -379,7 +384,7 @@ async def start_training(
                 steps=steps,
                 rank=rank,
                 learning_rate=float(lr),
-                hf_token=hf_token,
+                hf_token=resolved_token,
                 log_cb=lambda line: q.put({"type": "log", "line": line}),
                 cancel_event=cancel,
             )
@@ -528,12 +533,16 @@ async def animate_image(
     def _run():
         try:
             from services.video_pipeline import generate_video
+            from services.models import WAN_VIDEO, COGVIDEO
             hf_token = settings.get("hf_token", "")
+            video_model = settings.get("video_model", "wan2.1")
+            model_id = COGVIDEO.repo_id if video_model == "cogvideo" else WAN_VIDEO.repo_id
             q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting video generation..."})
             video = generate_video(
                 image_path=Path(image_path),
                 prompt=motion_prompt,
                 output_dir=proj.videos_dir,
+                model_id=model_id,
                 hf_token=hf_token,
                 progress_cb=lambda m: q.put(
                     {"type": "progress", "done": 0, "total": 1, "message": m}

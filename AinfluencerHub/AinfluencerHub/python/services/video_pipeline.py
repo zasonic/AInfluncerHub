@@ -137,9 +137,14 @@ def generate_video(
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
+        # Load and resize source image, preserving aspect ratio
         source = Image.open(image_path).convert("RGB")
-        source = source.resize((832, 480), Image.LANCZOS)
+        w, h = source.size
+        if h > w:
+            # Portrait → keep portrait orientation for video
+            source = source.resize((480, 832), Image.LANCZOS)
+        else:
+            source = source.resize((832, 480), Image.LANCZOS)
 
         if seed < 0:
             seed = random.randint(0, 2**32 - 1)
@@ -147,6 +152,11 @@ def generate_video(
 
         if progress_cb:
             progress_cb("Generating video... this may take several minutes.")
+
+        def _step_cb(pipe, step, timestep, kwargs):
+            if progress_cb:
+                progress_cb(f"Video denoising step {step + 1}/{steps}...")
+            return kwargs
 
         result = _pipeline(
             image=source,
@@ -156,6 +166,7 @@ def generate_video(
             num_inference_steps=steps,
             guidance_scale=cfg,
             generator=generator,
+            callback_on_step_end=_step_cb,
         )
 
         # Export frames to video

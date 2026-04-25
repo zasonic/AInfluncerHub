@@ -128,14 +128,15 @@ export const scoreDataset = (slug: string) =>
     "POST", `/api/dataset/${slug}/score`
   );
 
-/** Returns an EventSource streaming SSE progress events */
+/** Returns an EventSource streaming SSE progress events.
+ *  HF token is read from server-side settings — no longer sent in the URL. */
 export const startCaptioning = (
   slug: string,
-  hf_token: string,
+  _hf_token?: string,
   captioner: "florence2" | "joycaption" = "florence2"
 ): EventSource =>
   new EventSource(
-    `${_baseUrl}/api/captions/${slug}/run?hf_token=${encodeURIComponent(hf_token)}&captioner=${captioner}`
+    `${_baseUrl}/api/captions/${slug}/run?captioner=${captioner}`
   );
 
 export const getCaptions = (slug: string) =>
@@ -152,16 +153,16 @@ export const injectTrigger = (slug: string) =>
 
 // ── Training ───────────────────────────────────────────────────────────────
 
+/** HF token is read from server-side settings — no longer sent in the URL. */
 export const startTraining = (
   slug:          string,
-  hf_token:      string,
+  _hf_token:     string,
   steps:         number,
   rank:          number,
   learning_rate: string
 ): EventSource =>
   new EventSource(
     `${_baseUrl}/api/training/${slug}/start?` +
-    `hf_token=${encodeURIComponent(hf_token)}&` +
     `steps=${steps}&rank=${rank}&lr=${encodeURIComponent(learning_rate)}`
   );
 

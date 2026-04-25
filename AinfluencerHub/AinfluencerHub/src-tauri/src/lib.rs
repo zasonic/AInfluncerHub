@@ -138,10 +138,15 @@ pub fn run() {
             Ok(())
         })
         // Clean up Python on app exit
-        .on_window_event(|_window, event| {
+        .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                // Child process is daemon; OS will reap it automatically.
-                // Explicit kill is a best-effort bonus.
+                let state = window.app_handle().state::<PythonProcess>();
+                if let Ok(mut guard) = state.0.lock() {
+                    if let Some(ref mut child) = *guard {
+                        let _ = child.kill();
+                    }
+                    *guard = None;
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![get_backend_url])

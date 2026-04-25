@@ -177,7 +177,12 @@ def generate_dataset(
             if cancel_event and cancel_event.is_set():
                 break
 
-            full_prompt = f"{trigger_word}, {prompt}" if trigger_word else prompt
+            if trigger_word and "TRIGGER" in prompt:
+                full_prompt = prompt.replace("TRIGGER", trigger_word)
+            elif trigger_word:
+                full_prompt = f"{trigger_word}, {prompt}"
+            else:
+                full_prompt = prompt
             label = prompt[:50] + "..." if len(prompt) > 50 else prompt
             if progress_cb:
                 progress_cb(i, total, f"Generating {i + 1}/{total}: {label}")
@@ -264,6 +269,11 @@ def generate_image(
         if progress_cb:
             progress_cb("Generating image...")
 
+        def _step_cb(pipe, step, timestep, kwargs):
+            if progress_cb:
+                progress_cb(f"Denoising step {step + 1}/{steps}...")
+            return kwargs
+
         result = _pipeline(
             prompt=positive_prompt,
             negative_prompt=negative_prompt,
@@ -272,6 +282,7 @@ def generate_image(
             width=width,
             height=height,
             generator=generator,
+            callback_on_step_end=_step_cb,
         )
 
         paths: list[Path] = []
