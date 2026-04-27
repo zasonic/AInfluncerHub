@@ -7,6 +7,13 @@ with a fully native training loop.
 
 Training produces .safetensors LoRA weights that are directly loadable
 by the diffusion_pipeline for inference.
+
+Enhancements (2025):
+- Min-SNR gamma loss weighting (Hang et al., NeurIPS 2023): equalises
+  gradient magnitudes across timesteps for faster convergence on small
+  personal-photo datasets.
+- ColorJitter + RandomAffine augmentation to improve LoRA generalisation
+  across lighting conditions and minor pose variations.
 """
 
 import logging
@@ -20,6 +27,9 @@ from services.models import SDXL_BASE
 log = logging.getLogger("hub.trainer")
 
 BASE_MODEL_ID = SDXL_BASE.repo_id
+
+# Min-SNR gamma value from the paper (recommended default: 5)
+_MSNR_GAMMA = 5.0
 
 
 def prepare_training_folder(
@@ -74,7 +84,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────
+    # ── Step 1: Collect image-caption pairs ─────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -93,7 +103,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ────────────────────────────────────
+    # ── Step 2: Load model components ──────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -137,7 +147,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -161,17 +171,21 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────
+    # ── Step 4: Build dataset & dataloader ────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
             self.pairs = pairs
             self.tokenizer_1 = tokenizer_1
             self.tokenizer_2 = tokenizer_2
+            # ColorJitter prevents overfitting to a single person's specific
+            # lighting; RandomAffine adds minor pose variation for small datasets.
             self.transform = transforms.Compose([
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
                 transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05),
+                transforms.RandomAffine(degrees=5, translate=(0.02, 0.02)),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ])
@@ -204,7 +218,7 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ──────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -227,7 +241,28 @@ def run_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ────────────────────────────────────────────
+    # ── Step 6: Precompute min-SNR gamma weights ────────────────────────────────
+    #
+    # SNR(t) = alphas_cumprod[t] / (1 - alphas_cumprod[t])
+    # min-SNR weight(t) = clamp(SNR(t), max=gamma) / SNR(t)
+    #
+    # High-SNR timesteps (early, near-clean image) produce large gradients
+    # that dominate training and slow convergence.  Clamping with gamma=5
+    # equalises the effective gradient magnitude across all timesteps.
+    # Reference: Hang et al., "Improved Diffusion-based Image Synthesis using
+    # Min-SNR Loss Weighting", NeurIPS 2023.
+
+    try:
+        _alphas_cp = noise_scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)
+        _snr_values = _alphas_cp / (1.0 - _alphas_cp)
+        _use_msnr = True
+        _emit(f"Min-SNR gamma weighting enabled (gamma={_MSNR_GAMMA}).")
+    except Exception as exc:
+        log.warning("Min-SNR precompute failed (%s) — using standard MSE loss.", exc)
+        _snr_values = None
+        _use_msnr = False
+
+    # ── Step 7: Training loop ───────────────────────────────────────────────
 
     _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
     gradient_accumulation_steps = 4
@@ -293,8 +328,25 @@ def run_training(
             added_cond_kwargs=added_cond_kwargs,
         ).sample
 
-        # Loss (predict noise)
-        loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+        # ── Loss: min-SNR gamma weighted MSE ──────────────────────────────────
+        #
+        # Per-sample MSE across spatial dims, then weight each sample by
+        # its timestep's min-SNR factor before averaging across the batch.
+        # Falls back to standard mean MSE if _snr_values is unavailable.
+
+        raw_loss = F.mse_loss(model_pred.float(), noise.float(), reduction="none")
+        raw_loss = raw_loss.mean(dim=list(range(1, raw_loss.ndim)))  # [batch]
+
+        if _use_msnr and _snr_values is not None:
+            try:
+                snr_t = _snr_values[timesteps].float()
+                msnr_weights = torch.clamp(snr_t, max=_MSNR_GAMMA) / snr_t
+                loss = (raw_loss * msnr_weights).mean()
+            except Exception:
+                loss = raw_loss.mean()
+        else:
+            loss = raw_loss.mean()
+
         loss = loss / gradient_accumulation_steps
         loss.backward()
 
@@ -329,7 +381,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────
+    # ── Step 8: Save final LoRA ──────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"
