@@ -2,11 +2,24 @@
 services/diffusion_pipeline.py — Native image generation using HuggingFace diffusers.
 
 Replaces ComfyUI for all image generation:
-  - Face-consistent dataset generation via IP-Adapter-FaceID
+  - Face-consistent dataset generation via IP-Adapter-FaceID (preferred)
+    or IP-Adapter+ (fallback)
   - Text-to-image with trained LoRA weights
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+v2.1 improvements:
+  FaceID   — IP-Adapter FaceID uses InsightFace/ArcFace identity embeddings
+               instead of CLIP features, producing better face consistency in
+               the generated dataset. The InsightFace code already existed in
+               _extract_face_embedding() but was never wired to generation;
+               this connects it. Falls back to IP-Adapter+ if the FaceID
+               weights can't be loaded.
+  VAE fix  — The bundled SDXL VAE produces washed-out colors in fp16 inference.
+               We load madebyollin/sdxl-vae-fp16-fix (0.17 GB) on CUDA first;
+               it matches fp32 color accuracy at fp16 precision. Falls back to
+               the bundled VAE if the model isn't accessible.
 """
 
 import logging
@@ -15,13 +28,14 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import IP_ADAPTER, IP_ADAPTER_FACEID, SDXL_BASE, SDXL_VAE_FP16_FIX
 
 log = logging.getLogger("hub.diffusion")
 
 # Lazy globals — loaded on demand, freed after use
 _pipeline = None
 _ip_adapter_loaded = False
+_ip_adapter_type = "none"   # "faceid" | "standard" | "none"
 _face_app = None
 
 
@@ -40,7 +54,7 @@ def _load_base_pipeline(hf_token: str = ""):
     if _pipeline is not None:
         return
 
-    from diffusers import StableDiffusionXLPipeline
+    from diffusers import AutoencoderKL, StableDiffusionXLPipeline
 
     device, dtype = _get_device_and_dtype()
     log.info("Loading SDXL pipeline on %s ...", device)
@@ -48,6 +62,24 @@ def _load_base_pipeline(hf_token: str = ""):
     kwargs: dict = {"torch_dtype": dtype, "variant": "fp16", "use_safetensors": True}
     if hf_token:
         kwargs["token"] = hf_token
+
+    # On CUDA, swap in the fp16-fixed VAE to eliminate the color-shift / washed-out
+    # artifact that affects the bundled SDXL VAE when run in fp16. The fixed VAE
+    # (madebyollin/sdxl-vae-fp16-fix) is a 0.17 GB fine-tune that matches fp32
+    # color accuracy at fp16 — no extra memory overhead, just better images.
+    if device == "cuda":
+        try:
+            vae = AutoencoderKL.from_pretrained(
+                SDXL_VAE_FP16_FIX.repo_id,
+                torch_dtype=dtype,
+                token=hf_token or None,
+            )
+            kwargs["vae"] = vae
+            log.info("Using sdxl-vae-fp16-fix (accurate fp16 color reproduction).")
+        except Exception as vae_exc:
+            log.info(
+                "sdxl-vae-fp16-fix unavailable (%s) — using bundled VAE.", vae_exc
+            )
 
     _pipeline = StableDiffusionXLPipeline.from_pretrained(
         SDXL_BASE.repo_id, revision=SDXL_BASE.revision, **kwargs
@@ -66,22 +98,44 @@ def _load_base_pipeline(hf_token: str = ""):
 
 def _load_ip_adapter(hf_token: str = ""):
     """Load IP-Adapter for face-consistent generation."""
-    global _ip_adapter_loaded
+    global _ip_adapter_loaded, _ip_adapter_type
     if _ip_adapter_loaded:
         return
 
     _load_base_pipeline(hf_token)
 
-    log.info("Loading IP-Adapter face model...")
-    _pipeline.load_ip_adapter(
-        IP_ADAPTER.repo_id,
-        subfolder=IP_ADAPTER.subfolder,
-        weight_name=IP_ADAPTER.weight_name,
-        token=hf_token or None,
-    )
-    _pipeline.set_ip_adapter_scale(0.7)
-    _ip_adapter_loaded = True
-    log.info("IP-Adapter loaded.")
+    # Prefer IP-Adapter FaceID: uses InsightFace/ArcFace identity embeddings
+    # (face-recognition-optimised) rather than the generic CLIP features used
+    # by IP-Adapter+, giving better face-identity fidelity in the dataset.
+    # Falls back to IP-Adapter+ if the FaceID weights can't be fetched or loaded.
+    try:
+        log.info("Loading IP-Adapter FaceID (identity-optimized) ...")
+        _pipeline.load_ip_adapter(
+            IP_ADAPTER_FACEID.repo_id,
+            subfolder=None,
+            weight_name=IP_ADAPTER_FACEID.weight_name,
+            image_encoder_folder=None,  # FaceID uses InsightFace embeddings; no CLIP encoder
+            token=hf_token or None,
+        )
+        _pipeline.set_ip_adapter_scale(0.7)
+        _ip_adapter_type = "faceid"
+        _ip_adapter_loaded = True
+        log.info("IP-Adapter FaceID loaded.")
+    except Exception as faceid_exc:
+        log.info(
+            "IP-Adapter FaceID unavailable (%s) — falling back to IP-Adapter+.",
+            faceid_exc,
+        )
+        _pipeline.load_ip_adapter(
+            IP_ADAPTER.repo_id,
+            subfolder=IP_ADAPTER.subfolder,
+            weight_name=IP_ADAPTER.weight_name,
+            token=hf_token or None,
+        )
+        _pipeline.set_ip_adapter_scale(0.7)
+        _ip_adapter_type = "standard"
+        _ip_adapter_loaded = True
+        log.info("IP-Adapter+ (standard) loaded as fallback.")
 
 
 def _get_face_app():
@@ -129,12 +183,13 @@ def _prepare_face_image(image_path: Path):
 
 def unload() -> None:
     """Release all GPU memory."""
-    global _pipeline, _ip_adapter_loaded, _face_app
+    global _pipeline, _ip_adapter_loaded, _ip_adapter_type, _face_app
 
     if _pipeline is not None:
         del _pipeline
         _pipeline = None
         _ip_adapter_loaded = False
+        _ip_adapter_type = "none"
 
     if _face_app is not None:
         del _face_app
@@ -147,7 +202,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
@@ -160,10 +215,16 @@ def generate_dataset(
     cancel_event: threading.Event | None = None,
 ) -> list[Path]:
     """
-    Generate face-consistent dataset images using IP-Adapter.
+    Generate face-consistent dataset images using IP-Adapter FaceID (preferred)
+    or IP-Adapter+ (fallback).
 
-    Uses the reference image's face to guide generation, producing varied
-    poses and settings while maintaining face identity.
+    FaceID path: extracts an InsightFace/ArcFace embedding from the reference
+    image once and passes it as ip_adapter_image_embeds for each prompt.
+    This grounds every generated image in the subject's biometric identity
+    rather than just visual CLIP similarity.
+
+    Fallback path: passes the reference PIL image as ip_adapter_image, matching
+    the original IP-Adapter+ behaviour.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
@@ -172,6 +233,23 @@ def generate_dataset(
     try:
         _load_ip_adapter(hf_token)
         face_image = _prepare_face_image(reference_image)
+
+        # Pre-extract face identity embedding once for the whole dataset run.
+        # Only used when IP-Adapter FaceID is active; standard IP-Adapter uses
+        # the PIL image directly.  On any failure we drop back to the PIL path.
+        face_embed_tensor = None
+        if _ip_adapter_type == "faceid":
+            try:
+                import torch as _torch
+                face_embed = _extract_face_embedding(reference_image)
+                # diffusers IP-Adapter FaceID expects List[Tensor] with shape (1, 1, embed_dim)
+                face_embed_tensor = _torch.from_numpy(face_embed).unsqueeze(0).unsqueeze(0)
+            except Exception as embed_exc:
+                log.warning(
+                    "Face embedding extraction failed (%s) — "
+                    "falling back to PIL-image-based conditioning.",
+                    embed_exc,
+                )
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
@@ -187,16 +265,30 @@ def generate_dataset(
             generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
 
             try:
-                result = _pipeline(
-                    prompt=full_prompt,
-                    negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image=face_image,
-                    num_inference_steps=20,
-                    guidance_scale=4.0,
-                    width=832,
-                    height=1216,
-                    generator=generator,
-                )
+                if face_embed_tensor is not None:
+                    # FaceID path: pass InsightFace identity embedding directly
+                    result = _pipeline(
+                        prompt=full_prompt,
+                        negative_prompt="blurry, low quality, watermark, text, deformed",
+                        ip_adapter_image_embeds=[face_embed_tensor],
+                        num_inference_steps=20,
+                        guidance_scale=4.0,
+                        width=832,
+                        height=1216,
+                        generator=generator,
+                    )
+                else:
+                    # Standard IP-Adapter path (original behaviour / fallback)
+                    result = _pipeline(
+                        prompt=full_prompt,
+                        negative_prompt="blurry, low quality, watermark, text, deformed",
+                        ip_adapter_image=face_image,
+                        num_inference_steps=20,
+                        guidance_scale=4.0,
+                        width=832,
+                        height=1216,
+                        generator=generator,
+                    )
                 image = result.images[0]
                 out_path = output_dir / f"dataset_{len(paths) + 1:03d}.jpg"
                 image.save(out_path, quality=95)

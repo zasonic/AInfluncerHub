@@ -22,7 +22,7 @@ class ModelSpec:
     weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
+# ── Specs ────────────────────────────────────────────────────────────────────────────
 
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
@@ -31,13 +31,28 @@ SDXL_BASE = ModelSpec(
     required=True,
 )
 
+SDXL_VAE_FP16_FIX = ModelSpec(
+    repo_id="madebyollin/sdxl-vae-fp16-fix",
+    purpose="VAE fine-tuned for fp16 — eliminates color-shift artifacts in generated images",
+    size_gb=0.17,
+    required=False,
+)
+
 IP_ADAPTER = ModelSpec(
     repo_id="h94/IP-Adapter",
-    purpose="Face-consistent dataset generation (Step 2)",
+    purpose="Face-consistent dataset generation fallback (Step 2)",
     size_gb=1.8,
     required=True,
     subfolder="sdxl_models",
     weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors",
+)
+
+IP_ADAPTER_FACEID = ModelSpec(
+    repo_id="h94/IP-Adapter-FaceID",
+    purpose="Identity-optimized face conditioning via InsightFace embeddings (Step 2, preferred)",
+    size_gb=0.4,
+    required=False,
+    weight_name="ip-adapter-faceid_sdxl.bin",
 )
 
 FLORENCE_CAPTIONER = ModelSpec(
@@ -69,15 +84,17 @@ COGVIDEO = ModelSpec(
 )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
-    "sdxl_base":        SDXL_BASE,
-    "ip_adapter":       IP_ADAPTER,
-    "florence":         FLORENCE_CAPTIONER,
-    "joycaption":       JOY_CAPTIONER,
-    "wan_video":        WAN_VIDEO,
-    "cogvideo":         COGVIDEO,
+    "sdxl_base":         SDXL_BASE,
+    "sdxl_vae_fp16_fix": SDXL_VAE_FP16_FIX,
+    "ip_adapter":        IP_ADAPTER,
+    "ip_adapter_faceid": IP_ADAPTER_FACEID,
+    "florence":          FLORENCE_CAPTIONER,
+    "joycaption":        JOY_CAPTIONER,
+    "wan_video":         WAN_VIDEO,
+    "cogvideo":          COGVIDEO,
 }
 
 
