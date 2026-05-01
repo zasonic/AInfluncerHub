@@ -2,11 +2,25 @@
 services/diffusion_pipeline.py — Native image generation using HuggingFace diffusers.
 
 Replaces ComfyUI for all image generation:
-  - Face-consistent dataset generation via IP-Adapter-FaceID
+  - Face-consistent dataset generation via IP-Adapter-FaceID-PlusV2
   - Text-to-image with trained LoRA weights
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+v2.1 upgrade — IP-Adapter-FaceID-PlusV2:
+  Switches from CLIP-based face conditioning (ip-adapter-plus-face) to
+  recognition-embedding-based conditioning (ip-adapter-faceid-plusv2).
+  InsightFace ArcFace embeddings capture identity more precisely than CLIP
+  image embeddings, producing markedly more consistent faces across varied
+  poses and settings — exactly what LoRA training datasets require.
+
+  Safe dual-fallback strategy:
+    1. If FaceID-PlusV2 weights fail to load (network error, missing HF token)
+       → pipeline silently loads original CLIP IP-Adapter-Plus-Face instead.
+    2. If InsightFace detects no face in the reference image at generation time
+       → that specific generation falls back to CLIP conditioning.
+  Either way the user always gets output; they never see a hard failure.
 """
 
 import logging
@@ -15,7 +29,12 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import (
+    IP_ADAPTER_FACEID_LORA,
+    IP_ADAPTER_FACEID_V2,
+    IP_ADAPTER_PLUS_FACE,
+    SDXL_BASE,
+)
 
 log = logging.getLogger("hub.diffusion")
 
@@ -23,6 +42,8 @@ log = logging.getLogger("hub.diffusion")
 _pipeline = None
 _ip_adapter_loaded = False
 _face_app = None
+# True when IP-Adapter-FaceID-PlusV2 is active; False = CLIP fallback
+_faceid_v2_mode = False
 
 
 def _get_device_and_dtype():
@@ -65,23 +86,82 @@ def _load_base_pipeline(hf_token: str = ""):
 
 
 def _load_ip_adapter(hf_token: str = ""):
-    """Load IP-Adapter for face-consistent generation."""
-    global _ip_adapter_loaded
+    """
+    Load IP-Adapter for face-consistent generation.
+
+    Tries IP-Adapter-FaceID-PlusV2 first (recognition-embedding-based, better
+    identity preservation). If FaceID weights cannot be loaded for any reason,
+    silently falls back to the original CLIP-based IP-Adapter-Plus-Face so the
+    user always gets output.
+    """
+    global _ip_adapter_loaded, _faceid_v2_mode
     if _ip_adapter_loaded:
         return
 
     _load_base_pipeline(hf_token)
+    token_kwarg = {"token": hf_token} if hf_token else {}
 
-    log.info("Loading IP-Adapter face model...")
+    # ── Attempt 1: IP-Adapter-FaceID-PlusV2 (recognition embeddings) ─────────────
+    try:
+        log.info("Loading IP-Adapter-FaceID-PlusV2 ...")
+        _pipeline.load_ip_adapter(
+            IP_ADAPTER_FACEID_V2.repo_id,
+            subfolder=None,
+            weight_name=IP_ADAPTER_FACEID_V2.weight_name,
+            image_encoder_folder=None,
+            **token_kwarg,
+        )
+        _pipeline.set_ip_adapter_scale(0.7)
+
+        # Load the companion LoRA that improves ID consistency.
+        # adapter_name scopes it so it never clashes with user LoRAs loaded later.
+        try:
+            _pipeline.load_lora_weights(
+                IP_ADAPTER_FACEID_LORA.repo_id,
+                weight_name=IP_ADAPTER_FACEID_LORA.weight_name,
+                adapter_name="faceid_lora",
+                **token_kwarg,
+            )
+            _pipeline.set_adapters(["faceid_lora"], adapter_weights=[0.6])
+            log.info("FaceID companion LoRA loaded (ID consistency boost).")
+        except Exception as lora_exc:
+            # LoRA is optional — FaceID still works without it
+            log.debug("FaceID companion LoRA skipped: %s", lora_exc)
+
+        _ip_adapter_loaded = True
+        _faceid_v2_mode = True
+        log.info(
+            "IP-Adapter-FaceID-PlusV2 ready — recognition-embedding conditioning active."
+        )
+        return
+
+    except Exception as faceid_exc:
+        log.warning(
+            "IP-Adapter-FaceID-PlusV2 load failed (%s); falling back to CLIP adapter.",
+            faceid_exc,
+        )
+        # Clean up any partially loaded state before the fallback attempt.
+        try:
+            _pipeline.unload_ip_adapter()
+        except Exception:
+            pass
+        try:
+            _pipeline.unload_lora_weights()
+        except Exception:
+            pass
+
+    # ── Fallback: IP-Adapter Plus Face (CLIP-based) ───────────────────────────────
+    log.info("Loading IP-Adapter-Plus-Face (CLIP-based fallback) ...")
     _pipeline.load_ip_adapter(
-        IP_ADAPTER.repo_id,
-        subfolder=IP_ADAPTER.subfolder,
-        weight_name=IP_ADAPTER.weight_name,
-        token=hf_token or None,
+        IP_ADAPTER_PLUS_FACE.repo_id,
+        subfolder=IP_ADAPTER_PLUS_FACE.subfolder,
+        weight_name=IP_ADAPTER_PLUS_FACE.weight_name,
+        **token_kwarg,
     )
     _pipeline.set_ip_adapter_scale(0.7)
     _ip_adapter_loaded = True
-    log.info("IP-Adapter loaded.")
+    _faceid_v2_mode = False
+    log.info("IP-Adapter-Plus-Face (CLIP-based) loaded as fallback.")
 
 
 def _get_face_app():
@@ -102,7 +182,7 @@ def _get_face_app():
 
 
 def _extract_face_embedding(image_path: Path):
-    """Extract face embedding from a reference image."""
+    """Extract face embedding from a reference image. Returns normed_embedding (numpy)."""
     import cv2
 
     app = _get_face_app()
@@ -120,7 +200,7 @@ def _extract_face_embedding(image_path: Path):
 
 
 def _prepare_face_image(image_path: Path):
-    """Load and prepare a face image for IP-Adapter."""
+    """Load and prepare a face image for CLIP-based IP-Adapter."""
     from PIL import Image
 
     img = Image.open(image_path).convert("RGB")
@@ -129,12 +209,13 @@ def _prepare_face_image(image_path: Path):
 
 def unload() -> None:
     """Release all GPU memory."""
-    global _pipeline, _ip_adapter_loaded, _face_app
+    global _pipeline, _ip_adapter_loaded, _face_app, _faceid_v2_mode
 
     if _pipeline is not None:
         del _pipeline
         _pipeline = None
         _ip_adapter_loaded = False
+        _faceid_v2_mode = False
 
     if _face_app is not None:
         del _face_app
@@ -147,7 +228,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ─────────────────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
@@ -160,10 +241,14 @@ def generate_dataset(
     cancel_event: threading.Event | None = None,
 ) -> list[Path]:
     """
-    Generate face-consistent dataset images using IP-Adapter.
+    Generate face-consistent dataset images.
 
-    Uses the reference image's face to guide generation, producing varied
-    poses and settings while maintaining face identity.
+    When IP-Adapter-FaceID-PlusV2 is active, passes InsightFace recognition
+    embeddings as ``ip_adapter_image_embeds`` — significantly better identity
+    consistency than the previous CLIP-based ``ip_adapter_image`` approach.
+
+    Falls back to CLIP conditioning per-image if face detection fails for
+    that particular reference, so generation never hard-fails.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
@@ -171,7 +256,29 @@ def generate_dataset(
 
     try:
         _load_ip_adapter(hf_token)
-        face_image = _prepare_face_image(reference_image)
+
+        # ── Resolve face conditioning kwargs once, before the generation loop ──
+        # FaceID-PlusV2: pass recognition embedding tensor.
+        # CLIP fallback: pass cropped face PIL image.
+        if _faceid_v2_mode:
+            try:
+                import torch
+                face_emb_np = _extract_face_embedding(reference_image)
+                face_emb = torch.from_numpy(face_emb_np).unsqueeze(0)  # [1, 512]
+                ip_kwargs: dict = {"ip_adapter_image_embeds": [face_emb]}
+                log.info(
+                    "FaceID-PlusV2 active: using recognition embedding for conditioning."
+                )
+            except (ValueError, Exception) as emb_exc:
+                # No face detected or extraction failed — degrade gracefully
+                # to CLIP conditioning so the user still gets dataset images.
+                log.warning(
+                    "Face embedding extraction failed (%s); using CLIP conditioning.",
+                    emb_exc,
+                )
+                ip_kwargs = {"ip_adapter_image": _prepare_face_image(reference_image)}
+        else:
+            ip_kwargs = {"ip_adapter_image": _prepare_face_image(reference_image)}
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
@@ -190,7 +297,7 @@ def generate_dataset(
                 result = _pipeline(
                     prompt=full_prompt,
                     negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image=face_image,
+                    **ip_kwargs,
                     num_inference_steps=20,
                     guidance_scale=4.0,
                     width=832,

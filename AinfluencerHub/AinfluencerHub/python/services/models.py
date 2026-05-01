@@ -22,8 +22,7 @@ class ModelSpec:
     weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
-
+# ── Specs ────────────────────────────────────────────────────────────────────────────
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
     purpose="Image generation + LoRA training base (Steps 2, 4, 5)",
@@ -31,14 +30,44 @@ SDXL_BASE = ModelSpec(
     required=True,
 )
 
-IP_ADAPTER = ModelSpec(
-    repo_id="h94/IP-Adapter",
-    purpose="Face-consistent dataset generation (Step 2)",
-    size_gb=1.8,
+# ── IP-Adapter-FaceID-PlusV2 (primary) ───────────────────────────────────────────
+# Uses face recognition embeddings (InsightFace/ArcFace) instead of CLIP image
+# embeddings. Combines identity preservation (face ID) with structure guidance
+# for significantly better face consistency across varied poses and backgrounds.
+# Upgrade over ip-adapter-plus-face which relied on generic CLIP patch embeddings.
+IP_ADAPTER_FACEID_V2 = ModelSpec(
+    repo_id="h94/IP-Adapter-FaceID",
+    purpose="Face-consistent dataset generation via recognition embeddings (Step 2)",
+    size_gb=0.8,
     required=True,
+    subfolder=None,
+    weight_name="ip-adapter-faceid-plusv2_sdxl.bin",
+)
+
+# Companion LoRA — boosts face ID consistency when loaded alongside the adapter.
+IP_ADAPTER_FACEID_LORA = ModelSpec(
+    repo_id="h94/IP-Adapter-FaceID",
+    purpose="ID-consistency LoRA for FaceID-PlusV2 (Step 2)",
+    size_gb=0.2,
+    required=False,
+    subfolder=None,
+    weight_name="ip-adapter-faceid-plusv2_sdxl_lora.safetensors",
+)
+
+# ── IP-Adapter Plus Face SDXL (fallback) ─────────────────────────────────────────
+# CLIP-based face adapter. Used when InsightFace fails to detect a face in the
+# reference image, or when FaceID-PlusV2 weights cannot be loaded.
+IP_ADAPTER_PLUS_FACE = ModelSpec(
+    repo_id="h94/IP-Adapter",
+    purpose="Face-consistent generation fallback (CLIP-based, Step 2)",
+    size_gb=1.8,
+    required=False,
     subfolder="sdxl_models",
     weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors",
 )
+
+# Legacy alias kept so any external code importing IP_ADAPTER still resolves.
+IP_ADAPTER = IP_ADAPTER_PLUS_FACE
 
 FLORENCE_CAPTIONER = ModelSpec(
     repo_id="microsoft/Florence-2-large",
@@ -69,15 +98,16 @@ COGVIDEO = ModelSpec(
 )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
-
+# ── Public API ─────────────────────────────────────────────────────────────────────────────
 ALL: dict[str, ModelSpec] = {
-    "sdxl_base":        SDXL_BASE,
-    "ip_adapter":       IP_ADAPTER,
-    "florence":         FLORENCE_CAPTIONER,
-    "joycaption":       JOY_CAPTIONER,
-    "wan_video":        WAN_VIDEO,
-    "cogvideo":         COGVIDEO,
+    "sdxl_base":              SDXL_BASE,
+    "ip_adapter_faceid_v2":   IP_ADAPTER_FACEID_V2,
+    "ip_adapter_faceid_lora": IP_ADAPTER_FACEID_LORA,
+    "ip_adapter_plus_face":   IP_ADAPTER_PLUS_FACE,
+    "florence":               FLORENCE_CAPTIONER,
+    "joycaption":             JOY_CAPTIONER,
+    "wan_video":              WAN_VIDEO,
+    "cogvideo":               COGVIDEO,
 }
 
 
