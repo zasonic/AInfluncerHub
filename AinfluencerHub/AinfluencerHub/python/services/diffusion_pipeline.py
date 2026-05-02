@@ -1,5 +1,4 @@
-"""
-services/diffusion_pipeline.py — Native image generation using HuggingFace diffusers.
+"""services/diffusion_pipeline.py — Native image generation using HuggingFace diffusers.
 
 Replaces ComfyUI for all image generation:
   - Face-consistent dataset generation via IP-Adapter-FaceID
@@ -7,6 +6,14 @@ Replaces ComfyUI for all image generation:
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+guidance_scale notes:
+  generate_dataset (IP-Adapter): 6.0 — HuggingFace IP-Adapter docs recommend
+    6.0 with scale=0.7; the previous 4.0 underguided detail while the face
+    adapter was doing most of the work.
+  generate_image (standalone SDXL): 7.0 default — community baseline for
+    SDXL-base-1.0 with 20 steps; 4.0 is only appropriate for Lightning/Turbo
+    distilled variants (1–4 steps).
 """
 
 import logging
@@ -35,7 +42,7 @@ def _get_device_and_dtype():
 
 
 def _load_base_pipeline(hf_token: str = ""):
-    """Load the SDXL base pipeline."""
+    """Load the SDXL base pipeline with VRAM-aware memory optimizations."""
     global _pipeline
     if _pipeline is not None:
         return
@@ -54,12 +61,28 @@ def _load_base_pipeline(hf_token: str = ""):
     )
     _pipeline.to(device)
 
-    # Enable memory optimizations
     if device == "cuda":
+        # xformers as optional perf boost; fall back to PyTorch 2.0 SDPA
+        # (built-in, always available) + attention slicing for VRAM savings.
+        xformers_ok = False
         try:
             _pipeline.enable_xformers_memory_efficient_attention()
+            xformers_ok = True
         except Exception:
-            pass  # xformers optional
+            pass
+
+        if not xformers_ok:
+            # PyTorch 2.0+ SDPA is automatic; slicing further reduces peak VRAM.
+            try:
+                _pipeline.enable_attention_slicing(1)
+            except Exception:
+                pass
+
+        # VAE tiling reduces VRAM for large-resolution outputs (1024px+).
+        try:
+            _pipeline.enable_vae_tiling()
+        except Exception:
+            pass
 
     log.info("SDXL pipeline loaded.")
 
@@ -192,7 +215,7 @@ def generate_dataset(
                     negative_prompt="blurry, low quality, watermark, text, deformed",
                     ip_adapter_image=face_image,
                     num_inference_steps=20,
-                    guidance_scale=4.0,
+                    guidance_scale=6.0,  # HuggingFace IP-Adapter docs recommend 6.0
                     width=832,
                     height=1216,
                     generator=generator,
@@ -223,7 +246,7 @@ def generate_image(
     width: int = 832,
     height: int = 1216,
     steps: int = 20,
-    cfg: float = 4.0,
+    cfg: float = 7.0,  # SDXL-base baseline; 4.0 was Lightning/Turbo territory
     seed: int = -1,
     output_dir: Path | None = None,
     hf_token: str = "",

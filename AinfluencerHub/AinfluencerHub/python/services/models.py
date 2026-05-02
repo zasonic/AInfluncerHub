@@ -1,5 +1,4 @@
-"""
-services/models.py — Central registry for every HuggingFace model the app uses.
+"""services/models.py — Central registry for every HuggingFace model the app uses.
 
 All pipelines must import their model specs from this module instead of
 hard-coding repo IDs. This gives a single place to pin/bump model revisions,
@@ -50,20 +49,25 @@ FLORENCE_CAPTIONER = ModelSpec(
 JOY_CAPTIONER = ModelSpec(
     repo_id="fancyfeast/llama-joycaption-beta-one-hf-llava",
     purpose="Training-optimized captioning (Step 3)",
-    size_gb=10.0,
+    size_gb=10.0,  # ~10 GB at 4-bit quantization; ~17 GB at bf16
     required=False,
 )
 
+# I2V primary — fits in 16 GB VRAM with enable_model_cpu_offload().
+# The previous Wan2.1-T2V model was text-to-video only and crashed at
+# runtime when called with image= (TypeError on WanPipeline.__call__).
 WAN_VIDEO = ModelSpec(
-    repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
+    repo_id="Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
+    purpose="Image-to-video animation — optional high-quality (Step 5)",
     size_gb=28.0,
     required=False,
 )
 
+# Default I2V model used when no model_id is supplied to generate_video().
+# 10 GB fits comfortably in 16 GB VRAM without CPU offloading.
 COGVIDEO = ModelSpec(
     repo_id="THUDM/CogVideoX-5b-I2V",
-    purpose="Fallback image-to-video model (Step 5)",
+    purpose="Image-to-video animation — default for 16 GB VRAM (Step 5)",
     size_gb=10.0,
     required=False,
 )
