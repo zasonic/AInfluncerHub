@@ -54,28 +54,39 @@ JOY_CAPTIONER = ModelSpec(
     required=False,
 )
 
+# LTX-Video: fast portrait-native I2V model (~9.5 GB, 24 fps).
+# Preferred default when diffusers >= 0.32 is installed.
+# Satisfies LTX-Video’s 8N+1 frame constraint at num_frames=81 (≈3.4 s).
+LTX_VIDEO = ModelSpec(
+    repo_id="Lightricks/LTX-Video",
+    purpose="Fast image-to-video animation — default for Step 5 (24 fps, portrait)",
+    size_gb=9.5,
+    required=False,
+)
+
 WAN_VIDEO = ModelSpec(
     repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
+    purpose="Image-to-video animation (Step 5) — highest quality, 28 GB",
     size_gb=28.0,
     required=False,
 )
 
 COGVIDEO = ModelSpec(
     repo_id="THUDM/CogVideoX-5b-I2V",
-    purpose="Fallback image-to-video model (Step 5)",
+    purpose="Fallback image-to-video model (Step 5), 10 GB",
     size_gb=10.0,
     required=False,
 )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ──────────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
+    "ltx_video":        LTX_VIDEO,
     "wan_video":        WAN_VIDEO,
     "cogvideo":         COGVIDEO,
 }
