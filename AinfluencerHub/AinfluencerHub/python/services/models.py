@@ -1,5 +1,4 @@
-"""
-services/models.py — Central registry for every HuggingFace model the app uses.
+"""services/models.py — Central registry for every HuggingFace model the app uses.
 
 All pipelines must import their model specs from this module instead of
 hard-coding repo IDs. This gives a single place to pin/bump model revisions,
@@ -17,12 +16,12 @@ class ModelSpec:
     purpose:     str
     size_gb:     float
     required:    bool = True
-    revision:    str | None = None   # HF ref (branch / tag / commit); None = main
-    subfolder:   str | None = None   # for sub-artifacts inside a repo
-    weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
+    revision:    str | None = None
+    subfolder:   str | None = None
+    weight_name: str | None = None
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
+# ── Specs ────────────────────────────────────────────────────────────────────────────
 
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
@@ -48,16 +47,16 @@ FLORENCE_CAPTIONER = ModelSpec(
 )
 
 JOY_CAPTIONER = ModelSpec(
-    repo_id="fancyfeast/llama-joycaption-beta-one-hf-llava",
-    purpose="Training-optimized captioning (Step 3)",
+    repo_id="fancyfeast/llama-joycaption-alpha-two-hf-llava",
+    purpose="Training-optimized captioning with trigger-word naming support (Step 3)",
     size_gb=10.0,
     required=False,
 )
 
-WAN_VIDEO = ModelSpec(
-    repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
-    size_gb=28.0,
+LTX_VIDEO = ModelSpec(
+    repo_id="Lightricks/LTX-Video",
+    purpose="Portrait image-to-video animation — 16 GB VRAM-viable (Step 5)",
+    size_gb=14.0,
     required=False,
 )
 
@@ -69,15 +68,15 @@ COGVIDEO = ModelSpec(
 )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
-    "sdxl_base":        SDXL_BASE,
-    "ip_adapter":       IP_ADAPTER,
-    "florence":         FLORENCE_CAPTIONER,
-    "joycaption":       JOY_CAPTIONER,
-    "wan_video":        WAN_VIDEO,
-    "cogvideo":         COGVIDEO,
+    "sdxl_base":   SDXL_BASE,
+    "ip_adapter":  IP_ADAPTER,
+    "florence":    FLORENCE_CAPTIONER,
+    "joycaption":  JOY_CAPTIONER,
+    "ltx_video":   LTX_VIDEO,
+    "cogvideo":    COGVIDEO,
 }
 
 

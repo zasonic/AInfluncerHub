@@ -1,5 +1,4 @@
-"""
-services/lora_trainer.py — Native LoRA training using diffusers + peft + accelerate.
+"""services/lora_trainer.py — Native LoRA training using diffusers + peft + accelerate.
 
 Trains a LoRA adapter on the SDXL UNet using the user's dataset of
 captioned images.  Replaces the previous ai-toolkit subprocess approach
@@ -18,6 +17,14 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements:
+  No horizontal flip — RandomHorizontalFlip removed from the dataset transform.
+            Face LoRA training depends on facial asymmetries (moles, hair parts,
+            subtle expression differences left vs. right) to lock identity. Flipping
+            produces mirror-image faces that confuse identity learning and degrade
+            face consistency. Documented best practice in kohya_ss and community
+            guides; flip is an opt-in, not a default, for face subjects.
 """
 
 import logging
@@ -85,7 +92,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
+    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -104,7 +111,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ──────────────────────────────────────────────
+    # ── Step 2: Load model components ──────────────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -148,7 +155,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ─────────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -183,7 +190,7 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
+    # ── Step 4: Build dataset & dataloader ─────────────────────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -193,7 +200,8 @@ def run_training(
             self.transform = transforms.Compose([
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
-                transforms.RandomHorizontalFlip(),
+                # No horizontal flip: face LoRA relies on facial asymmetries for identity;
+                # flipping produces mirror images that degrade face consistency.
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ])
@@ -226,7 +234,7 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ──────────────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -249,7 +257,7 @@ def run_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ───────────────────────────────────────────────────────────
+    # ── Step 6: Training loop ──────────────────────────────────────────────────────────────────────
 
     _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
 
@@ -377,7 +385,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────
+    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"

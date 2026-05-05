@@ -1,11 +1,15 @@
-"""
-services/joy_captioner.py — JoyCaption image captioning for LoRA training.
+"""services/joy_captioner.py — JoyCaption image captioning for LoRA training.
 
-JoyCaption is purpose-built for generating natural-language captions optimized
+JoyCaption is purpose-built for generating natural-language captions optimised
 for diffusion model training.  It produces richer, more descriptive captions
-than Florence-2, which directly translates to better LoRA fidelity.
+than Florence-2, which directly translates to better LoRA prompt responsiveness.
 
-Model: fancyfeast/llama-joycaption-beta-one-hf-llava (~17 GB bf16, ~10 GB 4-bit)
+Model: JoyCaption Alpha Two (fancyfeast/llama-joycaption-alpha-two-hf-llava)
+  - ~10 GB in 4-bit (fits within 16 GB VRAM alongside other pipeline components)
+  - Fixes caption truncation bug present in Beta One
+  - Supports subject naming: the prompt can instruct the model to refer to the
+    person by the project trigger word, so captions already embed the activation
+    token instead of requiring a prepend pass afterward.
 """
 
 import logging
@@ -22,13 +26,28 @@ _device = None
 
 JOYCAPTION_MODEL_ID = JOY_CAPTIONER.repo_id
 
-# System prompt for training-style captions
-CAPTION_PROMPT = (
-    "Write a detailed description of this image for use as a training caption "
-    "for an AI image generation model. Describe the person's appearance, pose, "
-    "expression, clothing, and the setting. Be specific and use natural language. "
-    "Do not start with 'The image shows' or 'This is'. Just describe what you see."
-)
+
+def _build_caption_prompt(trigger_word: str = "") -> str:
+    """
+    Build a JoyCaption Alpha Two caption prompt.
+
+    When a trigger word is supplied, the prompt instructs the model to name
+    the subject using that word directly in the caption.  This leverages
+    Alpha Two's named-entity feature so captions are self-contained and the
+    trigger word appears naturally rather than being prepended as a tag.
+    """
+    base = (
+        "Write a detailed description of this image for use as a training caption "
+        "for an AI image generation model. Describe the person's appearance, pose, "
+        "expression, clothing, and the setting. Be specific and use natural language. "
+        "Do not start with 'The image shows' or 'This is'. Just describe what you see."
+    )
+    if trigger_word:
+        base += (
+            f" Refer to the person in the image as '{trigger_word}' "
+            "(use this name consistently; do not substitute pronouns)."
+        )
+    return base
 
 
 def _load_model(hf_token: str | None = None) -> None:
@@ -40,13 +59,13 @@ def _load_model(hf_token: str | None = None) -> None:
     from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
 
     _device = "cuda" if torch.cuda.is_available() else "cpu"
-    log.info("Loading JoyCaption on %s ...", _device)
+    log.info("Loading JoyCaption Alpha Two on %s ...", _device)
 
     kwargs: dict = {"trust_remote_code": True}
     if hf_token:
         kwargs["token"] = hf_token
 
-    # Use 4-bit quantization on GPU to fit in 10-12 GB VRAM
+    # Use 4-bit quantization on GPU to fit within 10–12 GB VRAM
     if _device == "cuda":
         kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -65,7 +84,7 @@ def _load_model(hf_token: str | None = None) -> None:
         trust_remote_code=True,
         token=hf_token or None,
     )
-    log.info("JoyCaption loaded.")
+    log.info("JoyCaption Alpha Two loaded.")
 
 
 def unload_model() -> None:
@@ -85,7 +104,7 @@ def caption_image(
     trigger_word: str = "",
     hf_token: str | None = None,
 ) -> str:
-    """Generate a training-optimized caption for a single image."""
+    """Generate a training-optimised caption for a single image."""
     import torch
     from PIL import Image
 
@@ -93,11 +112,13 @@ def caption_image(
 
     img = Image.open(image_path).convert("RGB")
 
-    # Build the chat-style prompt
+    # Alpha Two: pass the trigger word as a naming instruction in the prompt
+    caption_prompt = _build_caption_prompt(trigger_word)
+
     messages = [
         {"role": "user", "content": [
             {"type": "image"},
-            {"type": "text", "text": CAPTION_PROMPT},
+            {"type": "text", "text": caption_prompt},
         ]},
     ]
 
@@ -123,7 +144,9 @@ def caption_image(
     new_tokens = generated_ids[:, inputs["input_ids"].shape[1]:]
     caption = _processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
 
-    if trigger_word:
+    # Safety fallback: if the model didn't embed the trigger word despite the
+    # instruction, prepend it so the caption is always activation-ready.
+    if trigger_word and trigger_word not in caption:
         caption = f"{trigger_word}, {caption}"
 
     return caption
@@ -137,7 +160,7 @@ def caption_batch(
     cancel_event=None,
     captions_dir: Path | None = None,
 ) -> dict[Path, str]:
-    """Caption a list of images using JoyCaption.
+    """Caption a list of images using JoyCaption Alpha Two.
 
     Same interface as florence_captioner.caption_batch for drop-in replacement.
     """
