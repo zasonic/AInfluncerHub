@@ -17,6 +17,7 @@ export function Step5Studio(_props: Props) {
   const [videos,       setVideos]       = useState<GeneratedVideo[]>([]);
   const [prompt,       setPrompt]       = useState("");
   const [strength,     setStrength]     = useState(0.85);
+  const [genSeed,      setGenSeed]      = useState(-1);
   const [motionPrompt, setMotionPrompt] = useState("The person smiles gently and turns their head slightly.");
   const [selectedImg,  setSelectedImg]  = useState<GeneratedImage | null>(null);
   const [generating,   setGenerating]   = useState(false);
@@ -81,7 +82,7 @@ export function Step5Studio(_props: Props) {
     setGenError("");
     setGenerating(true);
     setGenStatus("Starting generation...");
-    genSSE.start(api.generateImage(slug, prompt, strength));
+    genSSE.start(api.generateImage(slug, prompt, strength, genSeed));
   };
 
   const animateImage = () => {
@@ -152,7 +153,7 @@ export function Step5Studio(_props: Props) {
             <div
               style={{
                 display:     "grid",
-                gridTemplateColumns: "1fr auto",
+                gridTemplateColumns: "1fr auto auto",
                 gap:         10,
                 alignItems:  "end",
               }}
@@ -168,6 +169,17 @@ export function Step5Studio(_props: Props) {
                   />
                   <span className="slider-value">{strength.toFixed(2)}</span>
                 </div>
+              </div>
+
+              <div className="field" style={{ margin: 0 }}>
+                <label style={{ whiteSpace: "nowrap" }}>Seed</label>
+                <input
+                  type="number"
+                  value={genSeed}
+                  onChange={(e) => setGenSeed(Number(e.target.value))}
+                  title="-1 = random seed"
+                  style={{ width: 90, textAlign: "right" }}
+                />
               </div>
 
               <button
@@ -308,46 +320,57 @@ export function Step5Studio(_props: Props) {
             )}
             {vidError && <div className="alert alert-error" style={{ padding: "8px 12px" }}>{vidError}</div>}
 
-            {/* Videos list */}
+            {/* Videos list with inline player */}
             {videos.length > 0 && (
               <div>
                 <h4 style={{ marginBottom: 8, fontSize: 13 }}>
                   {videos.length} video{videos.length !== 1 ? "s" : ""}
                 </h4>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {videos.map((v) => (
                     <div
                       key={v.path}
                       style={{
-                        display:       "flex",
-                        alignItems:    "center",
-                        justifyContent: "space-between",
-                        padding:       "8px 12px",
-                        background:    "var(--bg-panel)",
-                        borderRadius:  "var(--radius-md)",
-                        border:        "1px solid var(--border-subtle)",
+                        background:   "var(--bg-panel)",
+                        borderRadius: "var(--radius-md)",
+                        border:       "1px solid var(--border-subtle)",
+                        overflow:     "hidden",
                       }}
                     >
-                      <span
+                      <video
+                        src={api.videoUrl(v.path)}
+                        controls
+                        style={{ width: "100%", display: "block", maxHeight: 240 }}
+                      />
+                      <div
                         style={{
-                          fontSize:      12,
-                          color:         "var(--text-secondary)",
-                          overflow:      "hidden",
-                          textOverflow:  "ellipsis",
-                          whiteSpace:    "nowrap",
-                          flex:          1,
-                          marginRight:   8,
+                          display:        "flex",
+                          alignItems:     "center",
+                          justifyContent: "space-between",
+                          padding:        "6px 10px",
                         }}
                       >
-                        {v.filename}
-                      </span>
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => openFolder(v.path.split(/[\\/]/).slice(0, -1).join("/"))}
-                        style={{ flexShrink: 0 }}
-                      >
-                        Open
-                      </button>
+                        <span
+                          style={{
+                            fontSize:     11,
+                            color:        "var(--text-muted)",
+                            overflow:     "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace:   "nowrap",
+                            flex:         1,
+                            marginRight:  8,
+                          }}
+                        >
+                          {v.filename}
+                        </span>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => openFolder(v.path.split(/[\\/]/).slice(0, -1).join("/"))}
+                          style={{ flexShrink: 0 }}
+                        >
+                          Open
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>

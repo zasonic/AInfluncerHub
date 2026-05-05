@@ -181,14 +181,16 @@ export const downloadModel = (modelHfId: string): EventSource =>
 // ── Studio ─────────────────────────────────────────────────────────────────
 
 export const generateImage = (
-  slug:           string,
-  prompt:         string,
-  lora_strength:  number,
+  slug:          string,
+  prompt:        string,
+  lora_strength: number,
+  seed:          number = -1,
 ): EventSource =>
   new EventSource(
     `${_baseUrl}/api/studio/${slug}/generate?` +
     `prompt=${encodeURIComponent(prompt)}&` +
-    `lora_strength=${lora_strength}`
+    `lora_strength=${lora_strength}&` +
+    `seed=${seed}`
   );
 
 export const animateImage = (
@@ -216,9 +218,12 @@ export const getSettings = () =>
 export const updateSettings = (data: Partial<AppSettings>) =>
   request<void>("PUT", "/api/settings", data);
 
-// ── Image URL helper ───────────────────────────────────────────────────────
+// ── File URL helpers ───────────────────────────────────────────────────────
 
 export const imageUrl = (path: string) =>
   `${_baseUrl}/api/files/image?path=${encodeURIComponent(path)}`;
+
+export const videoUrl = (path: string) =>
+  `${_baseUrl}/api/files/video?path=${encodeURIComponent(path)}`;
 
 // SSE streaming is consumed through the `useSSE` hook in src/hooks/useSSE.ts.

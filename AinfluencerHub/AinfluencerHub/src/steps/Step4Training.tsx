@@ -13,13 +13,15 @@ export function Step4Training({ onAdvance }: Props) {
 
   const [hfToken,  setHfToken]  = useState(settings?.hf_token ?? "");
   const [steps,    setSteps]    = useState(settings?.training_steps ?? 2000);
-  const [rank,     setRank]     = useState(settings?.lora_rank ?? 16);
+  const [rank,     setRank]     = useState(settings?.lora_rank ?? 32);
   const [lr,       setLr]       = useState(settings?.learning_rate ?? "1e-4");
   const [logLines, setLogLines] = useState<{ text: string; type: "normal" | "error" | "warn" }[]>([]);
   const [done,     setDone]     = useState(false);
+  const [eta,      setEta]      = useState("");
 
-  const logRef = useRef<HTMLDivElement>(null);
-  const slug   = activeProject?.slug ?? "";
+  const logRef      = useRef<HTMLDivElement>(null);
+  const startTimeRef = useRef<number | null>(null);
+  const slug        = activeProject?.slug ?? "";
 
   const op  = useAsyncOperation();
   const sse = useSSE({
@@ -33,19 +35,30 @@ export function Step4Training({ onAdvance }: Props) {
 
         const m = text.match(/(\d+)\s*\/\s*(\d+)/);
         if (m) {
-          const total = Number(m[2]);
-          const doneCount = Number(m[1]);
-          if (total > 0 && doneCount >= 0 && doneCount <= total) {
-            op.setProgress(doneCount, total, text);
+          const total    = Number(m[2]);
+          const doneStep = Number(m[1]);
+          if (total > 0 && doneStep >= 0 && doneStep <= total) {
+            op.setProgress(doneStep, total, text);
+
+            if (doneStep > 0 && startTimeRef.current) {
+              const elapsed     = (Date.now() - startTimeRef.current) / 1000;
+              const secsPerStep = elapsed / doneStep;
+              const remaining   = Math.round(secsPerStep * (total - doneStep));
+              const h           = Math.floor(remaining / 3600);
+              const min         = Math.floor((remaining % 3600) / 60);
+              setEta(h > 0 ? `~${h}h ${min}m remaining` : `~${min}m remaining`);
+            }
           }
         }
       } else if (event.type === "done") {
         setDone(true);
+        setEta("");
         op.succeed("Training complete. LoRA saved.");
         refreshProject(slug);
         addLog("Training finished successfully.");
       } else if (event.type === "error") {
         op.fail(event.message);
+        setEta("");
         addLog(event.message, "error");
       }
     },
@@ -75,6 +88,8 @@ export function Step4Training({ onAdvance }: Props) {
     }
     setDone(false);
     setLogLines([]);
+    setEta("");
+    startTimeRef.current = Date.now();
     op.start(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`, steps);
     addLog(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`);
     sse.start(api.startTraining(slug, hfToken.trim(), steps, rank, lr));
@@ -83,6 +98,7 @@ export function Step4Training({ onAdvance }: Props) {
   const cancelTraining = () => {
     sse.stop();
     api.cancelTraining(slug).catch(() => {});
+    setEta("");
     addLog("Training cancelled.");
   };
 
@@ -246,6 +262,7 @@ export function Step4Training({ onAdvance }: Props) {
           {running && (
             <span className="text-xs text-muted">
               {Math.round(progressPct * 100)}% complete
+              {eta ? ` · ${eta}` : ""}
             </span>
           )}
         </div>
@@ -256,7 +273,7 @@ export function Step4Training({ onAdvance }: Props) {
             </button>
           ) : (
             <button
-              className="btn btn-ghost"
+              className="btn btn-primary"
               onClick={startTraining}
               disabled={running}
             >
