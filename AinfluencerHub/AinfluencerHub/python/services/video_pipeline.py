@@ -1,9 +1,7 @@
 """
 services/video_pipeline.py — Native video generation using HuggingFace diffusers.
 
-Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
-Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
-
+Supports image-to-video generation using Wan2.1-I2V or CogVideoX1.5 as a fallback.
 All operations run locally on the user's GPU without external services.
 """
 
@@ -40,7 +38,6 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
     if _pipeline is not None:
         return
 
-
     device, dtype = _get_device_and_dtype()
 
     if not model_id:
@@ -60,10 +57,10 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
         )
         _pipeline_type = "cogvideo"
     else:
-        # Wan2.1 pipeline
-        from diffusers import AutoPipelineForVideoGeneration
+        # Wan2.1 I2V — explicit class avoids auto-detect ambiguity with T2V variants
+        from diffusers import WanImageToVideoPipeline
 
-        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
+        _pipeline = WanImageToVideoPipeline.from_pretrained(
             model_id, **kwargs
         )
         _pipeline_type = "wan"
@@ -112,7 +109,7 @@ def generate_video(
         image_path:   Source image to animate.
         prompt:       Motion/scene description.
         output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
+        model_id:     HuggingFace model ID (defaults to Wan2.1-I2V).
         hf_token:     HuggingFace token for model download.
         num_frames:   Number of video frames to generate.
         steps:        Diffusion inference steps.
@@ -137,7 +134,7 @@ def generate_video(
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
+        # Load and resize source image to Wan2.1-I2V native 480P resolution
         source = Image.open(image_path).convert("RGB")
         source = source.resize((832, 480), Image.LANCZOS)
 

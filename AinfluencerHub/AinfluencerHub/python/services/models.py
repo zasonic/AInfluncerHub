@@ -22,7 +22,7 @@ class ModelSpec:
     weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
+# ── Specs ────────────────────────────────────────────
 
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
@@ -54,22 +54,27 @@ JOY_CAPTIONER = ModelSpec(
     required=False,
 )
 
+# Wan2.1-I2V-14B-480P: image-to-video model that takes the trained influencer
+# photo as the first frame and animates it. The previous T2V variant accepted
+# only text and would fail when image= was passed by video_pipeline.py.
 WAN_VIDEO = ModelSpec(
-    repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
+    repo_id="Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
     purpose="Image-to-video animation (Step 5)",
     size_gb=28.0,
     required=False,
 )
 
+# CogVideoX 1.5 I2V: higher quality than 1.0; same CogVideoXImageToVideoPipeline
+# interface so video_pipeline.py needs no changes beyond the model ID.
 COGVIDEO = ModelSpec(
-    repo_id="THUDM/CogVideoX-5b-I2V",
+    repo_id="THUDM/CogVideoX1.5-5B-I2V",
     purpose="Fallback image-to-video model (Step 5)",
-    size_gb=10.0,
+    size_gb=12.0,
     required=False,
 )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,

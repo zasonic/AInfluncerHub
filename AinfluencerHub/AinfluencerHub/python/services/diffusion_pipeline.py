@@ -60,6 +60,14 @@ def _load_base_pipeline(hf_token: str = ""):
             _pipeline.enable_xformers_memory_efficient_attention()
         except Exception:
             pass  # xformers optional
+        # VAE slicing and tiling reduce peak VRAM on encode/decode by 30-50%
+        # on high-res images, enabling use on cards below 16 GB. Output is
+        # identical — the VAE processes tiles/slices instead of the full tensor.
+        try:
+            _pipeline.enable_vae_slicing()
+            _pipeline.enable_vae_tiling()
+        except Exception:
+            pass  # not supported on all pipeline variants
 
     log.info("SDXL pipeline loaded.")
 
@@ -147,7 +155,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────
 
 
 def generate_dataset(
