@@ -18,6 +18,18 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements:
+  RS-LoRA — Rank-Stabilized Low-Rank Adaptation (Kalajdzievski, arXiv:2312.03732).
+             Scales LoRA updates by 1/sqrt(r) instead of 1/r, giving more
+             stable gradients at higher ranks (r>=16) with no extra parameters
+             or VRAM cost. Stacks cleanly with DoRA. Three-tier fallback:
+             DoRA+RSLoRA (peft>=0.10) → RSLoRA (peft>=0.6) → standard LoRA.
+  VAE fp32 — SDXL's VAE produces NaN latents in fp16 on some CUDA
+             architectures, silently corrupting training loss and producing
+             non-converging runs. Fix: upcast pixel values to float32 before
+             VAE encoding, then recast latents to weight_dtype. Matches the
+             approach in diffusers' own train_dreambooth_lora_sdxl.py.
 """
 
 import logging
@@ -85,7 +97,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
+    # ── Step 1: Collect image-caption pairs ────────────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -104,7 +116,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ──────────────────────────────────────────────
+    # ── Step 2: Load model components ──────────────────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -148,7 +160,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -163,15 +175,22 @@ def run_training(
         ],
     )
 
-    # DoRA (Liu et al., ICLR 2024): decomposes LoRA updates into magnitude +
-    # direction components, improving gradient flow and face-identity sharpness.
-    # Requires peft >= 0.9.0; older installs fall back to standard LoRA.
+    # Three-tier capability-probing fallback chain.
+    # DoRA (Liu et al. ICLR 2024): magnitude+direction decomposition → sharper
+    #   face identity by separating what is changed from how much.
+    # RS-LoRA (Kalajdzievski, arXiv:2312.03732): 1/sqrt(r) scaling → stable
+    #   gradients at higher ranks without extra parameters or VRAM.
+    # Both flags are additive and their benefits compound.
     try:
-        lora_config = LoraConfig(**_lora_base_kwargs, use_dora=True)
-        _emit("LoRA adapter: DoRA enabled (Weight-Decomposed, peft>=0.9.0) — improved identity consistency")
+        lora_config = LoraConfig(**_lora_base_kwargs, use_dora=True, use_rslora=True)
+        _emit("LoRA: DoRA + RS-LoRA (peft>=0.10.0) — best identity consistency and gradient scaling")
     except TypeError:
-        lora_config = LoraConfig(**_lora_base_kwargs)
-        _emit("LoRA adapter: standard LoRA (upgrade peft>=0.9.0 to enable DoRA for better results)")
+        try:
+            lora_config = LoraConfig(**_lora_base_kwargs, use_rslora=True)
+            _emit("LoRA: RS-LoRA enabled — sqrt(r) gradient scaling (upgrade peft>=0.9.0 for DoRA)")
+        except TypeError:
+            lora_config = LoraConfig(**_lora_base_kwargs)
+            _emit("LoRA: standard LoRA (upgrade peft>=0.6.0 for RS-LoRA, peft>=0.9.0 for DoRA)")
 
     unet = get_peft_model(unet, lora_config)
     unet.train()
@@ -183,7 +202,7 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
+    # ── Step 4: Build dataset & dataloader ──────────────────────────────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -226,7 +245,7 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ───────────────────────────────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -249,7 +268,7 @@ def run_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ───────────────────────────────────────────────────────────
+    # ── Step 6: Training loop ─────────────────────────────────────────────────────────────────────────────
 
     _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
 
@@ -282,9 +301,14 @@ def run_training(
         input_ids_1 = batch["input_ids_1"].to(device)
         input_ids_2 = batch["input_ids_2"].to(device)
 
-        # Encode images to latents
+        # Encode images to latents.
+        # Upcast to float32 before VAE encoding: SDXL's VAE produces NaN
+        # latents in fp16 on some CUDA architectures, silently corrupting the
+        # loss and yielding non-converging runs. Matches the fix in diffusers'
+        # train_dreambooth_lora_sdxl.py. Recast back to weight_dtype after
+        # sampling so the rest of the forward pass stays in fp16.
         with torch.no_grad():
-            latents = vae.encode(pixel_values).latent_dist.sample()
+            latents = vae.encode(pixel_values.float()).latent_dist.sample().to(weight_dtype)
             latents = latents * vae.config.scaling_factor
 
         # Encode text
@@ -377,7 +401,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────
+    # ── Step 7: Save final LoRA ────────────────────────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"
