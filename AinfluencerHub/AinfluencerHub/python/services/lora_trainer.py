@@ -18,6 +18,10 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+  Prodigy — Self-adapting optimizer (Mishchenko & Malitsky, NeurIPS 2023).
+            Eliminates manual learning rate tuning. Always use lr=1.0.
+            safeguard_warmup=True protects early steps internally.
+            Falls back to AdamW8bit → AdamW if not installed.
 """
 
 import logging
@@ -85,7 +89,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
+    # ── Step 1: Collect image-caption pairs ────────────────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -104,7 +108,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ──────────────────────────────────────────────
+    # ── Step 2: Load model components ────────────────────────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -148,7 +152,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -183,7 +187,7 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
+    # ── Step 4: Build dataset & dataloader ────────────────────────────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -226,32 +230,53 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────────────────────────────
 
+    # Prodigy (Mishchenko & Malitsky, NeurIPS 2023): self-adapting optimizer that
+    # eliminates manual learning rate tuning. Always use lr=1.0; safeguard_warmup
+    # handles early-step protection internally so warmup_steps = 0.
+    # Falls back to AdamW8bit → standard AdamW if prodigyopt is not installed.
+    use_prodigy = False
     try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(
+        from prodigyopt import Prodigy
+        optimizer = Prodigy(
             unet.parameters(),
-            lr=learning_rate,
+            lr=1.0,
             weight_decay=1e-2,
+            safeguard_warmup=True,
+            use_bias_correction=True,
         )
-        _emit("Using AdamW8bit optimizer.")
+        use_prodigy = True
+        _emit("Using Prodigy optimizer (self-adapting LR — no manual learning rate tuning needed).")
     except ImportError:
-        optimizer = torch.optim.AdamW(
-            unet.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-2,
-        )
-        _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using AdamW8bit optimizer.")
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit, prodigyopt for auto-LR).")
 
-    # Cosine LR scheduler with warmup
-    warmup_steps = max(50, steps // 20)
-    from torch.optim.lr_scheduler import CosineAnnealingLR
-    scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    # Cosine LR + linear warmup for AdamW-family; Prodigy manages its own schedule
+    if use_prodigy:
+        warmup_steps = 0
+        scheduler = None
+    else:
+        warmup_steps = max(50, steps // 20)
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ───────────────────────────────────────────────────────────
+    # ── Step 6: Training loop ───────────────────────────────────────────────────────────────────────────────
 
-    _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
+    _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate if not use_prodigy else '1.0 (Prodigy)'}")
 
     # Pre-compute alphas_cumprod for MinSNR-gamma weighting (done once, not per step)
     _alphas_cumprod_dev = noise_scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)
@@ -353,12 +378,13 @@ def run_training(
         if global_step % gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(unet.parameters(), 1.0)
             optimizer.step()
-            if global_step > warmup_steps:
+            if scheduler is not None and global_step > warmup_steps:
                 scheduler.step()
             optimizer.zero_grad()
 
-        # Warmup (linear)
-        if global_step <= warmup_steps:
+        # Linear LR warmup for AdamW-family optimizers only.
+        # Prodigy's safeguard_warmup=True handles early steps internally.
+        if not use_prodigy and global_step <= warmup_steps:
             warmup_lr = learning_rate * (global_step / warmup_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
@@ -367,8 +393,14 @@ def run_training(
         if global_step % 10 == 0 or global_step == 1:
             avg_loss = running_loss / 10 if global_step > 10 else running_loss
             running_loss = 0.0
-            current_lr = optimizer.param_groups[0]["lr"]
-            _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
+            if use_prodigy:
+                # Prodigy's effective LR = d * lr (d adapts automatically)
+                d = optimizer.param_groups[0].get("d", 1.0)
+                effective_lr = optimizer.param_groups[0]["lr"] * d
+                _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  d×lr: {effective_lr:.2e}")
+            else:
+                current_lr = optimizer.param_groups[0]["lr"]
+                _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
 
         # Save checkpoint
         if global_step % save_every == 0 and global_step < steps:
@@ -377,7 +409,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────
+    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"

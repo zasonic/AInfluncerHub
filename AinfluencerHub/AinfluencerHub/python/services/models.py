@@ -22,7 +22,7 @@ class ModelSpec:
     weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
+# ── Specs ────────────────────────────────────────────────────────────────────────────
 
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
@@ -54,28 +54,45 @@ JOY_CAPTIONER = ModelSpec(
     required=False,
 )
 
+SDXL_LIGHTNING = ModelSpec(
+    repo_id="ByteDance/SDXL-Lightning",
+    purpose="4-step distilled UNet for fast Studio preview — no LoRA, ~0.6 GB delta on top of SDXL base",
+    size_gb=0.6,
+    required=False,
+    weight_name="sdxl_lightning_4step_unet.safetensors",
+)
+
+LTX_VIDEO = ModelSpec(
+    repo_id="Lightricks/LTX-Video",
+    purpose="Primary image-to-video model (2B params, ~9 GB — runs on consumer GPUs)",
+    size_gb=9.0,
+    required=False,
+)
+
 WAN_VIDEO = ModelSpec(
     repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
+    purpose="Fallback image-to-video model if LTX-Video is unavailable (28 GB, high-VRAM GPUs)",
     size_gb=28.0,
     required=False,
 )
 
 COGVIDEO = ModelSpec(
     repo_id="THUDM/CogVideoX-5b-I2V",
-    purpose="Fallback image-to-video model (Step 5)",
+    purpose="Second-fallback image-to-video model (Step 5)",
     size_gb=10.0,
     required=False,
 )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
+    "sdxl_lightning":   SDXL_LIGHTNING,
+    "ltx_video":        LTX_VIDEO,
     "wan_video":        WAN_VIDEO,
     "cogvideo":         COGVIDEO,
 }

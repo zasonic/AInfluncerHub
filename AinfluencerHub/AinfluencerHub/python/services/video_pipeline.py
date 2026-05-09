@@ -2,7 +2,10 @@
 services/video_pipeline.py — Native video generation using HuggingFace diffusers.
 
 Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
-Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
+Supports image-to-video generation with the following priority order:
+  1. LTX-Video (Lightricks, 2B params, ~9 GB — runs on consumer GPUs)
+  2. Wan2.1-T2V-14B (28 GB — high-VRAM GPUs only)
+  3. CogVideoX-5b-I2V (10 GB — final fallback)
 
 All operations run locally on the user's GPU without external services.
 """
@@ -12,10 +15,11 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import COGVIDEO, WAN_VIDEO
+from services.models import COGVIDEO, LTX_VIDEO, WAN_VIDEO
 
 log = logging.getLogger("hub.video")
 
+LTX_MODEL_ID = LTX_VIDEO.repo_id
 WAN_MODEL_ID = WAN_VIDEO.repo_id
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
 
@@ -34,17 +38,16 @@ def _get_device_and_dtype():
 
 
 def _load_pipeline(model_id: str = "", hf_token: str = ""):
-    """Load the video generation pipeline."""
+    """Load the video generation pipeline with LTX-Video first, then fallbacks."""
     global _pipeline, _pipeline_type
 
     if _pipeline is not None:
         return
 
-
     device, dtype = _get_device_and_dtype()
 
     if not model_id:
-        model_id = WAN_MODEL_ID
+        model_id = LTX_MODEL_ID  # Default: LTX-Video (~9 GB, consumer-friendly)
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -55,17 +58,41 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
     if "CogVideo" in model_id:
         from diffusers import CogVideoXImageToVideoPipeline
 
-        _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(
-            model_id, **kwargs
-        )
+        _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(model_id, **kwargs)
         _pipeline_type = "cogvideo"
+
+    elif "LTX" in model_id or "Lightricks" in model_id:
+        try:
+            from diffusers import LTXImageToVideoPipeline
+
+            _pipeline = LTXImageToVideoPipeline.from_pretrained(model_id, **kwargs)
+            _pipeline_type = "ltx"
+            log.info("LTX-Video pipeline loaded.")
+        except Exception as exc:
+            log.warning("LTX-Video failed (%s) — trying Wan2.1 ...", exc)
+            try:
+                from diffusers import AutoPipelineForVideoGeneration
+
+                _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
+                    WAN_MODEL_ID, **kwargs
+                )
+                _pipeline_type = "wan"
+                log.info("Wan2.1 fallback pipeline loaded.")
+            except Exception as exc2:
+                log.warning("Wan2.1 failed (%s) — trying CogVideoX ...", exc2)
+                from diffusers import CogVideoXImageToVideoPipeline
+
+                _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(
+                    COGVIDEO_MODEL_ID, **kwargs
+                )
+                _pipeline_type = "cogvideo"
+                log.info("CogVideoX fallback pipeline loaded.")
+
     else:
-        # Wan2.1 pipeline
+        # Wan2.1 or other explicit model ID
         from diffusers import AutoPipelineForVideoGeneration
 
-        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
-            model_id, **kwargs
-        )
+        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(model_id, **kwargs)
         _pipeline_type = "wan"
 
     # Enable CPU offloading for large models
@@ -112,7 +139,7 @@ def generate_video(
         image_path:   Source image to animate.
         prompt:       Motion/scene description.
         output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
+        model_id:     HuggingFace model ID (defaults to LTX-Video).
         hf_token:     HuggingFace token for model download.
         num_frames:   Number of video frames to generate.
         steps:        Diffusion inference steps.
@@ -145,6 +172,9 @@ def generate_video(
             seed = random.randint(0, 2**32 - 1)
         generator = torch.Generator(device="cpu").manual_seed(seed)
 
+        # LTX-Video architecture caps at 97 frames
+        actual_frames = min(num_frames, 97) if _pipeline_type == "ltx" else num_frames
+
         if progress_cb:
             progress_cb("Generating video... this may take several minutes.")
 
@@ -152,7 +182,7 @@ def generate_video(
             image=source,
             prompt=prompt,
             negative_prompt="",
-            num_frames=num_frames,
+            num_frames=actual_frames,
             num_inference_steps=steps,
             guidance_scale=cfg,
             generator=generator,
