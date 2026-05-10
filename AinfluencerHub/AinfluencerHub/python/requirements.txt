@@ -21,6 +21,11 @@ bitsandbytes>=0.43.0,<1.0.0
 torch>=2.1.0,<3.0.0
 torchvision>=0.16.0,<1.0.0
 
+# Prodigy optimiser (Mishchenko & Defazio, ECCV 2024).
+# Auto-discovers the learning rate so non-technical users never need to tune lr.
+# Optional — lora_trainer.py falls back to AdamW8bit when not installed.
+prodigyopt>=1.0,<2.0
+
 # Face-consistent generation (IP-Adapter)
 insightface>=0.7.3,<1.0.0
 onnxruntime-gpu>=1.17.0,<2.0.0
