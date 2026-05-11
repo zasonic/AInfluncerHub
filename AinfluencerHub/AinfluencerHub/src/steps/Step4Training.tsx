@@ -68,16 +68,22 @@ export function Step4Training({ onAdvance }: Props) {
     setLogLines((prev) => [...prev.slice(-500), { text, type }]);
   };
 
-  const startTraining = () => {
+  const startTraining = async () => {
     if (!hfToken.trim()) {
-      op.fail("HuggingFace token is required to download the training model.");
+      op.fail("HuggingFace token is required to download the base model.");
       return;
     }
     setDone(false);
     setLogLines([]);
     op.start(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`, steps);
     addLog(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`);
-    sse.start(api.startTraining(slug, hfToken.trim(), steps, rank, lr));
+    try {
+      await api.updateSettings({ hf_token: hfToken.trim() });
+    } catch {
+      op.fail("Failed to save HuggingFace token — check backend connection.");
+      return;
+    }
+    sse.start(api.startTraining(slug, steps, rank, lr));
   };
 
   const cancelTraining = () => {
@@ -119,7 +125,8 @@ export function Step4Training({ onAdvance }: Props) {
                   onChange={(e) => setHfToken(e.target.value)}
                 />
                 <span className="field-hint">
-                  Get a read token at huggingface.co/settings/tokens
+                  Get a read token at huggingface.co/settings/tokens.
+                  Saved securely when training starts.
                 </span>
               </div>
             </div>

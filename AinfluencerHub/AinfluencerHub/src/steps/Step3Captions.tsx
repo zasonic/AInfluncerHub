@@ -73,10 +73,9 @@ export function Step3Captions({ onAdvance }: Props) {
 
   const runAutocaption = () => {
     if (!slug) return;
-    const hf_token = settings?.hf_token ?? "";
     const modelLabel = captioner === "joycaption" ? "JoyCaption" : "Florence2";
     op.start(`Loading ${modelLabel}...`, images.length);
-    sse.start(api.startCaptioning(slug, hf_token, captioner));
+    sse.start(api.startCaptioning(slug, captioner));
   };
 
   const injectTrigger = async () => {
@@ -256,6 +255,13 @@ export function Step3Captions({ onAdvance }: Props) {
             }}
           >
             <h4 style={{ marginBottom: 10 }}>Batch actions</h4>
+
+            {captioner === "joycaption" && !settings?.hf_token && (
+              <div className="alert alert-warning" style={{ marginBottom: 10, fontSize: 12 }}>
+                JoyCaption requires a HuggingFace token. Set it in Settings before captioning.
+              </div>
+            )}
+
             <div className="field" style={{ margin: "0 0 10px 0" }}>
               <label style={{ fontSize: 11 }}>Captioning model</label>
               <div className="flex gap-8">
