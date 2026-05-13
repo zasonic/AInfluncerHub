@@ -22,7 +22,7 @@ class ModelSpec:
     weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
+# ── Specs ───────────────────────────────────────────────────────────────
 
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
@@ -54,8 +54,13 @@ JOY_CAPTIONER = ModelSpec(
     required=False,
 )
 
+# Wan2.1-I2V-14B is the Image-to-Video variant of the Wan2.1 family.
+# The T2V variant (Wan2.1-T2V-14B) does not accept an input image and
+# would either crash or discard the reference photo when called with
+# image=.  AutoPipelineForVideoGeneration routes to
+# WanImageToVideoPipeline when given the I2V model.
 WAN_VIDEO = ModelSpec(
-    repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
+    repo_id="Wan-AI/Wan2.1-I2V-14B-Diffusers",
     purpose="Image-to-video animation (Step 5)",
     size_gb=28.0,
     required=False,
