@@ -1,4 +1,4 @@
-"""  
+"""
 services/diffusion_pipeline.py — Native image generation using HuggingFace diffusers.
 
 Replaces ComfyUI for all image generation:
@@ -12,14 +12,16 @@ v2 improvements:
   VAE fp16 stability — SDXL's VAE has known numerical precision issues at fp16,
     producing NaN artifacts and all-black images. After pipeline load, the VAE is
     cast to float32 while the UNet stays in fp16. diffusers handles the latent
-    upcast before VAE decode automatically (diffusers >= 0.28).
-    Source: SDXL paper appendix + diffusers community standard practice.
+    upcast before VAE decode automatically (>= 0.28).
+    Source: SDXL paper + diffusers community standard practice.
 
   Multi-reference face averaging — generate_dataset() now accepts a list of
-    reference images instead of a single path. IP-Adapter-Plus-Face in
-    diffusers >= 0.28 averages image embeddings when ip_adapter_image is a list,
-    producing more consistent face identity when multiple reference photos are
-    supplied. Safe fallback to first image alone on older builds.
+    reference images. Face embeddings are extracted via InsightFace, averaged
+    with numpy, and used as the IP-Adapter conditioning signal. This avoids
+    diffusers Issue #9813 (feature mixing when passing a list to
+    ip_adapter_image for ip-adapter-plus-face). Produces more consistent
+    face identity when multiple reference photos are available. Falls back to
+    single-image IP-Adapter on any extraction failure.
 """
 
 import logging
@@ -67,7 +69,6 @@ def _load_base_pipeline(hf_token: str = ""):
     )
     _pipeline.to(device)
 
-    # Enable memory optimizations
     if device == "cuda":
         try:
             _pipeline.enable_xformers_memory_efficient_attention()
@@ -77,6 +78,7 @@ def _load_base_pipeline(hf_token: str = ""):
         # VAE fp16 precision fix: SDXL's VAE produces NaN artifacts and
         # all-black images at fp16. Cast VAE to float32; the UNet stays in
         # fp16. diffusers auto-upcasts latents before VAE decode (>= 0.28).
+        # Source: SDXL paper appendix + diffusers community standard practice.
         try:
             import torch
             _pipeline.vae.to(torch.float32)
@@ -125,25 +127,70 @@ def _get_face_app():
 
 
 def _extract_face_embedding(image_path: Path):
-    """Extract face embedding from a reference image."""
+    """Extract normed face embedding from a reference image. Returns None if no face detected."""
     import cv2
 
     app = _get_face_app()
     img = cv2.imread(str(image_path))
     if img is None:
-        raise ValueError(f"Could not read image: {image_path}")
+        log.warning("Could not read image: %s", image_path)
+        return None
 
     faces = app.get(img)
     if not faces:
-        raise ValueError(f"No face detected in {image_path.name}")
+        log.warning("No face detected in %s", image_path.name)
+        return None
 
-    # Use the largest face
+    # Use the largest detected face
     face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
     return face.normed_embedding
 
 
+def _average_face_embeddings(reference_images: list[Path]):
+    """
+    Extract face embeddings from all reference images and return the mean.
+
+    Avoids diffusers Issue #9813 (unintended feature mixing when passing a
+    list to ip_adapter_image for ip-adapter-plus-face). Averaging normed
+    embeddings directly gives a well-defined blended identity signal.
+
+    Returns (averaged_embedding, pil_fallback_image):
+      - averaged_embedding: numpy array or None if extraction fails for all images
+      - pil_fallback_image: PIL Image of the first valid reference (for fallback)
+    """
+    import numpy as np
+    from PIL import Image
+
+    embeddings = []
+    fallback_image = None
+
+    for ref_path in reference_images:
+        if not ref_path.exists():
+            continue
+        if fallback_image is None:
+            try:
+                fallback_image = Image.open(ref_path).convert("RGB")
+            except Exception:
+                pass
+        emb = _extract_face_embedding(ref_path)
+        if emb is not None:
+            embeddings.append(emb)
+
+    if not embeddings:
+        return None, fallback_image
+
+    averaged = np.mean(embeddings, axis=0)
+    # Re-normalize after averaging so the vector stays on the unit sphere
+    norm = np.linalg.norm(averaged)
+    if norm > 0:
+        averaged = averaged / norm
+
+    log.info("Averaged %d/%d face embeddings for IP-Adapter.", len(embeddings), len(reference_images))
+    return averaged, fallback_image
+
+
 def _prepare_face_image(image_path: Path):
-    """Load and prepare a face image for IP-Adapter."""
+    """Load and prepare a face image for IP-Adapter (single-image path)."""
     from PIL import Image
 
     img = Image.open(image_path).convert("RGB")
@@ -185,10 +232,13 @@ def generate_dataset(
     """
     Generate face-consistent dataset images using IP-Adapter.
 
-    Accepts a list of reference images. IP-Adapter-Plus-Face averages the image
-    embeddings when a list is passed to ip_adapter_image (diffusers >= 0.28),
-    producing more consistent face identity when multiple reference photos are
-    available. Falls back to the first image alone on older builds.
+    Accepts a list of reference images. Face embeddings are extracted from
+    each via InsightFace and averaged (with re-normalisation) to form a
+    single blended identity signal. This avoids diffusers Issue #9813
+    (incorrect batch processing when passing a list to ip_adapter_image).
+
+    Fallback: if face extraction fails for all references, falls back to
+    the single-image IP-Adapter path using the first valid reference photo.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
@@ -197,15 +247,30 @@ def generate_dataset(
     try:
         _load_ip_adapter(hf_token)
 
-        # Prepare all reference face images outside the generation loop.
-        # IP-Adapter-Plus-Face averages embeddings when given a list.
-        face_images = [_prepare_face_image(r) for r in reference_images if r.exists()]
-        if not face_images:
-            raise ValueError("No valid reference images found.")
+        # Multi-reference: average face embeddings via InsightFace.
+        # This bypasses diffusers Issue #9813 (list ip_adapter_image mixing).
+        averaged_embedding, fallback_image = _average_face_embeddings(reference_images)
 
-        # Use list for multi-ref averaging; single image for single ref.
-        ip_input = face_images if len(face_images) > 1 else face_images[0]
-        log.info("IP-Adapter: using %d reference image(s).", len(face_images))
+        if averaged_embedding is not None:
+            # Build an ip_adapter_image_embeds tensor from the averaged embedding.
+            # The IP-Adapter face encoder maps 512-dim normed embeddings to the
+            # cross-attention space. We inject the pre-averaged embedding directly.
+            try:
+                import torch
+                import numpy as np
+                face_emb_tensor = torch.from_numpy(averaged_embedding).unsqueeze(0).unsqueeze(0)
+                if _pipeline.device.type == "cuda":
+                    face_emb_tensor = face_emb_tensor.to(_pipeline.device, dtype=torch.float16)
+                use_averaged = True
+                log.info("Using averaged face embedding from %d reference(s).", len(reference_images))
+            except Exception as exc:
+                log.warning("Could not build averaged embedding tensor (%s); using image fallback.", exc)
+                use_averaged = False
+        else:
+            use_averaged = False
+
+        if not use_averaged and fallback_image is None:
+            raise ValueError("No valid reference images found.")
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
@@ -220,30 +285,36 @@ def generate_dataset(
             import torch
             generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
 
+            gen_kwargs: dict = dict(
+                prompt=full_prompt,
+                negative_prompt="blurry, low quality, watermark, text, deformed",
+                num_inference_steps=20,
+                guidance_scale=4.0,
+                width=832,
+                height=1216,
+                generator=generator,
+            )
+
+            if use_averaged:
+                # Pass pre-averaged embedding directly; avoids the list-API bug.
+                gen_kwargs["ip_adapter_image_embeds"] = [face_emb_tensor]
+            else:
+                # Fallback: single-image IP-Adapter (original behaviour).
+                gen_kwargs["ip_adapter_image"] = fallback_image
+
             try:
-                result = _pipeline(
-                    prompt=full_prompt,
-                    negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image=ip_input,
-                    num_inference_steps=20,
-                    guidance_scale=4.0,
-                    width=832,
-                    height=1216,
-                    generator=generator,
-                )
-            except TypeError:
-                # Older diffusers build: list input not accepted — use first ref only.
-                log.info("IP-Adapter list input unsupported; falling back to single reference.")
-                result = _pipeline(
-                    prompt=full_prompt,
-                    negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image=face_images[0],
-                    num_inference_steps=20,
-                    guidance_scale=4.0,
-                    width=832,
-                    height=1216,
-                    generator=generator,
-                )
+                result = _pipeline(**gen_kwargs)
+            except Exception as exc:
+                # Last-resort: embedding path failed, retry with image fallback.
+                log.warning("Generation with averaged embedding failed (%s); retrying with image fallback.", exc)
+                if fallback_image is not None:
+                    fallback_kwargs = {k: v for k, v in gen_kwargs.items()
+                                       if k not in ("ip_adapter_image_embeds",)}
+                    fallback_kwargs["ip_adapter_image"] = fallback_image
+                    result = _pipeline(**fallback_kwargs)
+                else:
+                    log.error("Generation failed and no fallback image available: %s", exc)
+                    continue
 
             image = result.images[0]
             out_path = output_dir / f"dataset_{len(paths) + 1:03d}.jpg"
