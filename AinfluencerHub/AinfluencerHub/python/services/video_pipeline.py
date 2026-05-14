@@ -2,9 +2,15 @@
 services/video_pipeline.py — Native video generation using HuggingFace diffusers.
 
 Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
-Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
+Supports image-to-video generation using CogVideoX or Wan2.1.
 
 All operations run locally on the user's GPU without external services.
+
+Default model changed to CogVideoX-5b-I2V (10 GB) from Wan2.1-T2V-14B (28 GB).
+Wan2.1 requires >24 GB VRAM even with CPU offloading, exceeding the target
+16 GB consumer GPU. CogVideoX-5b-I2V fits on 16 GB with enable_model_cpu_offload().
+Pass model_id explicitly to use Wan2.1 on higher-VRAM hardware.
+Source: THUDM/CogVideoX-5b-I2V model card.
 """
 
 import logging
@@ -40,11 +46,12 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
     if _pipeline is not None:
         return
 
-
     device, dtype = _get_device_and_dtype()
 
+    # Default to CogVideoX-5b-I2V (10 GB): fits on 16 GB VRAM with CPU offloading.
+    # Wan2.1-14B (28 GB) is available by passing model_id explicitly.
     if not model_id:
-        model_id = WAN_MODEL_ID
+        model_id = COGVIDEO_MODEL_ID
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -112,7 +119,9 @@ def generate_video(
         image_path:   Source image to animate.
         prompt:       Motion/scene description.
         output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
+        model_id:     HuggingFace model ID. Defaults to CogVideoX-5b-I2V (10 GB).
+                      Pass Wan-AI/Wan2.1-T2V-14B-Diffusers for higher quality
+                      on systems with >24 GB VRAM.
         hf_token:     HuggingFace token for model download.
         num_frames:   Number of video frames to generate.
         steps:        Diffusion inference steps.
