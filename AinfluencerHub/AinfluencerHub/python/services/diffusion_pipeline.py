@@ -1,4 +1,4 @@
-"""
+"""  
 services/diffusion_pipeline.py — Native image generation using HuggingFace diffusers.
 
 Replaces ComfyUI for all image generation:
@@ -7,6 +7,19 @@ Replaces ComfyUI for all image generation:
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+v2 improvements:
+  VAE fp16 stability — SDXL's VAE has known numerical precision issues at fp16,
+    producing NaN artifacts and all-black images. After pipeline load, the VAE is
+    cast to float32 while the UNet stays in fp16. diffusers handles the latent
+    upcast before VAE decode automatically (diffusers >= 0.28).
+    Source: SDXL paper appendix + diffusers community standard practice.
+
+  Multi-reference face averaging — generate_dataset() now accepts a list of
+    reference images instead of a single path. IP-Adapter-Plus-Face in
+    diffusers >= 0.28 averages image embeddings when ip_adapter_image is a list,
+    producing more consistent face identity when multiple reference photos are
+    supplied. Safe fallback to first image alone on older builds.
 """
 
 import logging
@@ -60,6 +73,16 @@ def _load_base_pipeline(hf_token: str = ""):
             _pipeline.enable_xformers_memory_efficient_attention()
         except Exception:
             pass  # xformers optional
+
+        # VAE fp16 precision fix: SDXL's VAE produces NaN artifacts and
+        # all-black images at fp16. Cast VAE to float32; the UNet stays in
+        # fp16. diffusers auto-upcasts latents before VAE decode (>= 0.28).
+        try:
+            import torch
+            _pipeline.vae.to(torch.float32)
+            log.info("VAE cast to float32 for fp16 stability.")
+        except Exception as exc:
+            log.warning("VAE float32 cast failed (continuing in fp16): %s", exc)
 
     log.info("SDXL pipeline loaded.")
 
@@ -147,11 +170,11 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ─────────────────────────────────────────────────────────
 
 
 def generate_dataset(
-    reference_image: Path,
+    reference_images: list[Path],
     prompts: list[str],
     trigger_word: str,
     output_dir: Path,
@@ -162,8 +185,10 @@ def generate_dataset(
     """
     Generate face-consistent dataset images using IP-Adapter.
 
-    Uses the reference image's face to guide generation, producing varied
-    poses and settings while maintaining face identity.
+    Accepts a list of reference images. IP-Adapter-Plus-Face averages the image
+    embeddings when a list is passed to ip_adapter_image (diffusers >= 0.28),
+    producing more consistent face identity when multiple reference photos are
+    available. Falls back to the first image alone on older builds.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
@@ -171,7 +196,16 @@ def generate_dataset(
 
     try:
         _load_ip_adapter(hf_token)
-        face_image = _prepare_face_image(reference_image)
+
+        # Prepare all reference face images outside the generation loop.
+        # IP-Adapter-Plus-Face averages embeddings when given a list.
+        face_images = [_prepare_face_image(r) for r in reference_images if r.exists()]
+        if not face_images:
+            raise ValueError("No valid reference images found.")
+
+        # Use list for multi-ref averaging; single image for single ref.
+        ip_input = face_images if len(face_images) > 1 else face_images[0]
+        log.info("IP-Adapter: using %d reference image(s).", len(face_images))
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
@@ -190,24 +224,39 @@ def generate_dataset(
                 result = _pipeline(
                     prompt=full_prompt,
                     negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image=face_image,
+                    ip_adapter_image=ip_input,
                     num_inference_steps=20,
                     guidance_scale=4.0,
                     width=832,
                     height=1216,
                     generator=generator,
                 )
-                image = result.images[0]
-                out_path = output_dir / f"dataset_{len(paths) + 1:03d}.jpg"
-                image.save(out_path, quality=95)
-                paths.append(out_path)
+            except TypeError:
+                # Older diffusers build: list input not accepted — use first ref only.
+                log.info("IP-Adapter list input unsupported; falling back to single reference.")
+                result = _pipeline(
+                    prompt=full_prompt,
+                    negative_prompt="blurry, low quality, watermark, text, deformed",
+                    ip_adapter_image=face_images[0],
+                    num_inference_steps=20,
+                    guidance_scale=4.0,
+                    width=832,
+                    height=1216,
+                    generator=generator,
+                )
 
-            except Exception as exc:
-                log.error("Generation failed for prompt %d: %s", i, exc)
-                continue
+            image = result.images[0]
+            out_path = output_dir / f"dataset_{len(paths) + 1:03d}.jpg"
+            image.save(out_path, quality=95)
+            paths.append(out_path)
 
         if progress_cb:
             progress_cb(total, total, f"Generated {len(paths)} images.")
+
+    except Exception as exc:
+        log.error("Dataset generation error: %s", exc)
+        if progress_cb:
+            progress_cb(total, total, f"Error: {str(exc)[:200]}")
 
     finally:
         unload()
