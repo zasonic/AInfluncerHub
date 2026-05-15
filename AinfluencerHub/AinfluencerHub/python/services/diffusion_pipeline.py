@@ -7,6 +7,17 @@ Replaces ComfyUI for all image generation:
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+v2 inference improvements applied here (training unchanged):
+  VAE swap   — madebyollin/sdxl-vae-fp16-fix replaces the default SDXL VAE.
+               The original VAE has numerical instabilities at float16 that
+               produce colour banding and saturation shifts. The fixed VAE is a
+               170 MB community-standard drop-in with the same decoder API.
+               Falls back silently to the bundled VAE on any error.
+  Scheduler  — DPM++ 2M Karras (Lu et al. 2022) replaces EulerDiscrete.
+               Produces equivalent or better quality at the same 20-step budget;
+               widely adopted across SDXL pipelines. Falls back to the pipeline
+               default on any error.
 """
 
 import logging
@@ -35,7 +46,7 @@ def _get_device_and_dtype():
 
 
 def _load_base_pipeline(hf_token: str = ""):
-    """Load the SDXL base pipeline."""
+    """Load the SDXL base pipeline with quality improvements."""
     global _pipeline
     if _pipeline is not None:
         return
@@ -52,7 +63,38 @@ def _load_base_pipeline(hf_token: str = ""):
     _pipeline = StableDiffusionXLPipeline.from_pretrained(
         SDXL_BASE.repo_id, revision=SDXL_BASE.revision, **kwargs
     )
+
+    # Inject FP16-safe VAE before moving to device.
+    # madebyollin/sdxl-vae-fp16-fix patches numerical instabilities in the
+    # original SDXL VAE that produce colour banding and saturation shifts at
+    # float16. It is a community-standard 170 MB drop-in with the same API.
+    try:
+        from diffusers import AutoencoderKL as _AutoencoderKL
+        _vae_kwargs: dict = {"torch_dtype": dtype}
+        if hf_token:
+            _vae_kwargs["token"] = hf_token
+        _pipeline.vae = _AutoencoderKL.from_pretrained(
+            "madebyollin/sdxl-vae-fp16-fix", **_vae_kwargs
+        )
+        log.info("Using FP16-safe VAE (madebyollin/sdxl-vae-fp16-fix).")
+    except Exception as _vae_exc:
+        log.warning("FP16-safe VAE unavailable, falling back to bundled VAE: %s", _vae_exc)
+
     _pipeline.to(device)
+
+    # Switch to DPM++ 2M Karras scheduler (Lu et al. 2022).
+    # Produces equivalent or better quality vs EulerDiscrete at the same step
+    # count; maintains full quality at 20 inference steps without tuning.
+    try:
+        from diffusers import DPMSolverMultistepScheduler as _DPMScheduler
+        _pipeline.scheduler = _DPMScheduler.from_config(
+            _pipeline.scheduler.config,
+            use_karras_sigmas=True,
+            algorithm_type="dpmsolver++",
+        )
+        log.info("Using DPM++ 2M Karras scheduler.")
+    except Exception as _sched_exc:
+        log.warning("DPM++ scheduler unavailable, using pipeline default: %s", _sched_exc)
 
     # Enable memory optimizations
     if device == "cuda":
@@ -147,7 +189,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ──────────────────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(

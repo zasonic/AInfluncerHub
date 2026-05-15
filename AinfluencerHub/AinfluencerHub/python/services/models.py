@@ -22,13 +22,20 @@ class ModelSpec:
     weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
+# ── Specs ──────────────────────────────────────────────────────────────────────────────
 
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
     purpose="Image generation + LoRA training base (Steps 2, 4, 5)",
     size_gb=6.5,
     required=True,
+)
+
+SDXL_VAE_FIXED = ModelSpec(
+    repo_id="madebyollin/sdxl-vae-fp16-fix",
+    purpose="FP16-safe VAE drop-in for SDXL — fixes colour banding at float16 (Steps 2, 4, 5)",
+    size_gb=0.17,
+    required=False,
 )
 
 IP_ADAPTER = ModelSpec(
@@ -69,10 +76,11 @@ COGVIDEO = ModelSpec(
 )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
+    "sdxl_vae_fixed":   SDXL_VAE_FIXED,
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
