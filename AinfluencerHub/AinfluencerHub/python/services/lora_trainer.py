@@ -9,15 +9,21 @@ Training produces .safetensors LoRA weights that are directly loadable
 by the diffusion_pipeline for inference.
 
 v2.1 training improvements:
-  DoRA  — Weight-Decomposed Low-Rank Adaptation (Liu et al., ICLR 2024).
-            Decomposes LoRA updates into magnitude + direction components for
-            better gradient flow and sharper face identity. Enabled when
-            peft >= 0.9.0; falls back to standard LoRA silently.
-  MinSNR — Signal-to-noise ratio weighted loss (Hang et al. 2023 / CVPR 2024).
-            Prevents high-noise timesteps from dominating training. Produces
-            sharper detail and more consistent results without extra steps.
-            gamma=5.0 (published optimal default). Falls back to standard MSE
-            loss on any exception so training is never interrupted.
+  DoRA     — Weight-Decomposed Low-Rank Adaptation (Liu et al., ICLR 2024).
+              Decomposes LoRA updates into magnitude + direction components for
+              better gradient flow and sharper face identity. Enabled when
+              peft >= 0.9.0; falls back to standard LoRA silently.
+  MinSNR   — Signal-to-noise ratio weighted loss (Hang et al. 2023 / CVPR 2024).
+              Prevents high-noise timesteps from dominating training. Produces
+              sharper detail and more consistent results without extra steps.
+              gamma=5.0 (published optimal default). Falls back to standard MSE
+              loss on any exception so training is never interrupted.
+  VAE fp32 — SDXL's VAE is numerically unstable in fp16, causing NaN gradients
+              and corrupted checkpoints on many consumer GPUs. VAE is always
+              loaded in fp32; latents are cast back to weight_dtype after encoding.
+              Adds ~300 MB VRAM but prevents a class of silent training failures.
+  xformers — Enabled automatically when available, saving 1-2 GB VRAM during
+              training with no quality impact. Falls back silently if not installed.
 """
 
 import logging
@@ -85,7 +91,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
+    # ── Step 1: Collect image-caption pairs ─────────────────────────────────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -104,7 +110,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ──────────────────────────────────────────────
+    # ── Step 2: Load model components ────────────────────────────────────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -126,9 +132,13 @@ def run_training(
             BASE_MODEL_ID, subfolder="text_encoder_2",
             torch_dtype=weight_dtype, token=hf_token or None,
         ).to(device)
+        # VAE always runs in float32 regardless of the main training dtype.
+        # SDXL's VAE is numerically unstable in fp16 on many consumer GPUs,
+        # causing NaN gradients and ruined checkpoints. The VAE is frozen so
+        # its fp32 state adds ~300 MB VRAM but no training overhead.
         vae = AutoencoderKL.from_pretrained(
             BASE_MODEL_ID, subfolder="vae",
-            torch_dtype=weight_dtype, token=hf_token or None,
+            torch_dtype=torch.float32, token=hf_token or None,
         ).to(device)
         unet = UNet2DConditionModel.from_pretrained(
             BASE_MODEL_ID, subfolder="unet",
@@ -148,7 +158,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ────────────────────────────────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -176,6 +186,14 @@ def run_training(
     unet = get_peft_model(unet, lora_config)
     unet.train()
 
+    # xformers memory-efficient attention reduces training VRAM by ~1-2 GB.
+    if device == "cuda":
+        try:
+            unet.enable_xformers_memory_efficient_attention()
+            _emit("xformers enabled — reduced training VRAM usage.")
+        except Exception:
+            pass  # xformers optional; standard attention used as fallback
+
     trainable_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in unet.parameters())
     _emit(f"LoRA: {trainable_params:,} trainable params / {total_params:,} total ({100 * trainable_params / total_params:.2f}%)")
@@ -183,7 +201,7 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
+    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -226,7 +244,7 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ─────────────────────────────────────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -249,7 +267,7 @@ def run_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ───────────────────────────────────────────────────────────
+    # ── Step 6: Training loop ───────────────────────────────────────────────────────────────────────────────────
 
     _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
 
@@ -282,10 +300,12 @@ def run_training(
         input_ids_1 = batch["input_ids_1"].to(device)
         input_ids_2 = batch["input_ids_2"].to(device)
 
-        # Encode images to latents
+        # Encode images to latents.
+        # VAE runs in fp32; cast pixel_values up for encoding then cast latents
+        # back to weight_dtype so the rest of the training loop stays in fp16.
         with torch.no_grad():
-            latents = vae.encode(pixel_values).latent_dist.sample()
-            latents = latents * vae.config.scaling_factor
+            latents = vae.encode(pixel_values.to(torch.float32)).latent_dist.sample()
+            latents = (latents * vae.config.scaling_factor).to(weight_dtype)
 
         # Encode text
         with torch.no_grad():
@@ -377,7 +397,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────
+    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"

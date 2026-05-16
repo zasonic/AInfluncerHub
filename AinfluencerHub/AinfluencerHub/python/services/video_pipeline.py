@@ -137,9 +137,17 @@ def generate_video(
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
+        # Load and resize source image.
+        # AI influencer photos are typically portrait (taller than wide), so we
+        # default to 480×832 for portrait inputs — matching TikTok/Reels format.
+        # Landscape/square images still use 832×480.
         source = Image.open(image_path).convert("RGB")
-        source = source.resize((832, 480), Image.LANCZOS)
+        orig_w, orig_h = source.size
+        if orig_h > orig_w:
+            target_w, target_h = 480, 832
+        else:
+            target_w, target_h = 832, 480
+        source = source.resize((target_w, target_h), Image.LANCZOS)
 
         if seed < 0:
             seed = random.randint(0, 2**32 - 1)

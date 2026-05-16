@@ -7,6 +7,14 @@ Replaces ComfyUI for all image generation:
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+v2.1 stability fix — VAE float32:
+  SDXL's VAE is numerically unstable in float16 on many consumer GPUs,
+  producing black frames, NaN artifacts, or washed-out images. The fix:
+  load the whole pipeline in fp16, then upcast only the VAE to fp32.
+  The SDXL community settled on this approach; diffusers recommends it
+  in their SDXL best-practices guide. The overhead is ~300 MB extra VRAM
+  and negligible latency — the VAE runs once per image, not per step.
 """
 
 import logging
@@ -54,6 +62,12 @@ def _load_base_pipeline(hf_token: str = ""):
     )
     _pipeline.to(device)
 
+    # SDXL VAE is numerically unstable in fp16 on many consumer GPUs.
+    # Keeping it in fp32 prevents black/NaN outputs with ~300 MB VRAM overhead.
+    if device == "cuda":
+        import torch as _torch
+        _pipeline.vae = _pipeline.vae.to(dtype=_torch.float32)
+
     # Enable memory optimizations
     if device == "cuda":
         try:
@@ -61,7 +75,7 @@ def _load_base_pipeline(hf_token: str = ""):
         except Exception:
             pass  # xformers optional
 
-    log.info("SDXL pipeline loaded.")
+    log.info("SDXL pipeline loaded (VAE in fp32 for stability).")
 
 
 def _load_ip_adapter(hf_token: str = ""):
@@ -147,7 +161,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ──────────────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
