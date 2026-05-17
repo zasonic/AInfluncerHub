@@ -7,6 +7,13 @@ Replaces ComfyUI for all image generation:
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+Memory improvements:
+  - enable_vae_slicing() is applied at load time on CUDA to prevent OOM
+    errors when saving portrait-format images on 8-10 GB GPUs. No quality
+    change — the VAE decodes in slices rather than all at once.
+  - GPU OOM errors are now caught with helpful user-facing messages rather
+    than propagating a raw CUDA error to the UI.
 """
 
 import logging
@@ -56,6 +63,10 @@ def _load_base_pipeline(hf_token: str = ""):
 
     # Enable memory optimizations
     if device == "cuda":
+        # VAE slicing decodes one image slice at a time instead of the full
+        # tensor, cutting peak VRAM usage with no quality loss. Important for
+        # portrait-format generation (832×1216) on 8-10 GB GPUs.
+        _pipeline.enable_vae_slicing()
         try:
             _pipeline.enable_xformers_memory_efficient_attention()
         except Exception:
@@ -147,7 +158,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ──────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
@@ -202,6 +213,16 @@ def generate_dataset(
                 image.save(out_path, quality=95)
                 paths.append(out_path)
 
+            except torch.cuda.OutOfMemoryError:
+                log.error("GPU OOM on prompt %d — consider closing GPU-intensive apps", i)
+                if progress_cb:
+                    progress_cb(
+                        i, total,
+                        f"⚠️ GPU memory full at image {i + 1}/{total}. "
+                        "Try closing other applications that use your GPU, "
+                        "or lower the image resolution in Settings.",
+                    )
+                continue
             except Exception as exc:
                 log.error("Generation failed for prompt %d: %s", i, exc)
                 continue
@@ -284,6 +305,15 @@ def generate_image(
             progress_cb(f"Generated {len(paths)} image(s).")
 
         return paths
+
+    except torch.cuda.OutOfMemoryError:
+        log.error("GPU OOM in generate_image")
+        if progress_cb:
+            progress_cb(
+                "GPU ran out of memory. Try reducing the image resolution, "
+                "closing other GPU-intensive applications, or restarting the app."
+            )
+        return []
 
     finally:
         # Unload LoRA weights to avoid contaminating next generation

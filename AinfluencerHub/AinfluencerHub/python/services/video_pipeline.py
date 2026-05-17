@@ -5,6 +5,12 @@ Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
 Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
 
 All operations run locally on the user's GPU without external services.
+
+Error handling:
+  - torch.cuda.OutOfMemoryError is caught before the generic Exception handler
+    so users see an actionable message rather than a raw CUDA error. The
+    message suggests switching to CogVideoX (the smaller fallback model)
+    which needs ~10 GB vs Wan2.1's ~28 GB.
 """
 
 import logging
@@ -171,6 +177,16 @@ def generate_video(
             progress_cb("Video created successfully.")
 
         return out_path
+
+    except torch.cuda.OutOfMemoryError:
+        log.error("GPU OOM in video generation — model requires significant VRAM")
+        if progress_cb:
+            progress_cb(
+                "GPU ran out of memory. Video generation requires significant VRAM "
+                "(Wan2.1 needs ~28 GB; try switching to CogVideoX in Settings, "
+                "which needs ~10 GB). Closing other GPU-intensive applications may also help."
+            )
+        return None
 
     except Exception as exc:
         log.error("Video generation failed: %s", exc)
