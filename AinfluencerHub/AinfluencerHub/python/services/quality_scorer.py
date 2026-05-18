@@ -50,7 +50,11 @@ def score_images(
 ) -> list[dict]:
     """Score images for face quality and aesthetics.
 
-    Returns list of dicts: {path, face_score, aesthetic_score, passed}
+    Returns list of dicts:
+      {path, filename, face_score, aesthetic_score, passed, reject_reason}
+
+    reject_reason is None for passing images and a plain-English string for
+    failing ones so the UI can explain why a photo was rejected.
     """
     if _face_metric is None:
         load_models()
@@ -67,12 +71,36 @@ def score_images(
             face_score = 0.0
             aesthetic_score = 0.0
 
+        face_ok = face_score >= FACE_THRESHOLD
+        aesthetic_ok = aesthetic_score >= AESTHETIC_THRESHOLD
+        passed = face_ok and aesthetic_ok
+
+        if not passed:
+            if not face_ok and not aesthetic_ok:
+                reject_reason = (
+                    f"face quality too low ({face_score:.2f} < {FACE_THRESHOLD}) "
+                    f"and aesthetic quality too low ({aesthetic_score:.1f} < {AESTHETIC_THRESHOLD})"
+                )
+            elif not face_ok:
+                reject_reason = (
+                    f"face quality too low ({face_score:.2f} < {FACE_THRESHOLD}) — "
+                    "try a clearer, well-lit photo where the face is the main subject"
+                )
+            else:
+                reject_reason = (
+                    f"aesthetic quality too low ({aesthetic_score:.1f} < {AESTHETIC_THRESHOLD}) — "
+                    "try a sharper, better-composed photo"
+                )
+        else:
+            reject_reason = None
+
         results.append({
             "path": str(img_path),
             "filename": img_path.name,
             "face_score": round(face_score, 3),
             "aesthetic_score": round(aesthetic_score, 3),
-            "passed": face_score >= FACE_THRESHOLD and aesthetic_score >= AESTHETIC_THRESHOLD,
+            "passed": passed,
+            "reject_reason": reject_reason,
         })
 
         if progress_cb:

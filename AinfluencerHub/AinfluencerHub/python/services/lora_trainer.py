@@ -23,6 +23,7 @@ v2.1 training improvements:
 import logging
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -40,10 +41,12 @@ def prepare_training_folder(
     """
     Copy .txt captions from captions_dir into dataset_dir so that
     the training loop can find image + caption pairs in one folder.
+    Overwrites stale copies when the source caption is newer, so
+    edits made after an initial copy are not silently ignored.
     """
     for txt in captions_dir.glob("*.txt"):
         dest = dataset_dir / txt.name
-        if not dest.exists():
+        if not dest.exists() or txt.stat().st_mtime > dest.stat().st_mtime:
             shutil.copy2(txt, dest)
 
 
@@ -85,7 +88,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
+    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -104,7 +107,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ──────────────────────────────────────────────
+    # ── Step 2: Load model components ─────────────────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -148,7 +151,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ─────────────────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -183,7 +186,7 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
+    # ── Step 4: Build dataset & dataloader ─────────────────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -226,7 +229,7 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ─────────────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -249,7 +252,7 @@ def run_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ───────────────────────────────────────────────────────────
+    # ── Step 6: Training loop ─────────────────────────────────────────────────────────────────────
 
     _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
 
@@ -262,6 +265,7 @@ def run_training(
     global_step = 0
     running_loss = 0.0
     save_every = max(250, steps // 8)
+    _start_time = time.time()
 
     data_iter = iter(dataloader)
 
@@ -368,7 +372,12 @@ def run_training(
             avg_loss = running_loss / 10 if global_step > 10 else running_loss
             running_loss = 0.0
             current_lr = optimizer.param_groups[0]["lr"]
-            _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
+            elapsed = time.time() - _start_time
+            steps_per_sec = global_step / max(elapsed, 1e-6)
+            remaining_steps = steps - global_step
+            eta_sec = int(remaining_steps / steps_per_sec) if steps_per_sec > 0 else 0
+            eta_str = f"{eta_sec // 60}m {eta_sec % 60}s"
+            _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}  ETA: {eta_str}")
 
         # Save checkpoint
         if global_step % save_every == 0 and global_step < steps:
@@ -377,7 +386,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────
+    # ── Step 7: Save final LoRA ─────────────────────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"
