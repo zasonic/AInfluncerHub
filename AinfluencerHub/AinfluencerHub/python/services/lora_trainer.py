@@ -18,6 +18,16 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements:
+  Prodigy — Parameter-free adaptive optimizer (Mishchenko & Malitsky, 2023).
+             Automatically determines a good effective learning rate from gradient
+             magnitudes, so non-technical users no longer need to tune lr.
+             Uses nominal lr=1.0 (Prodigy's scale-invariant starting point) with
+             safeguard_warmup=True to prevent overshooting in the first steps.
+             Falls back to AdamW8bit then AdamW when prodigy-opt is not installed.
+             Warmup manual override and cosine scheduler are skipped when Prodigy
+             is active (Prodigy manages its own effective step size).
 """
 
 import logging
@@ -228,26 +238,48 @@ def run_training(
 
     # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
 
+    # Prodigy (Mishchenko & Malitsky, ICLR 2024): parameter-free adaptive optimizer.
+    # Sets its own effective learning rate from gradient magnitudes — no LR tuning.
+    # safeguard_warmup prevents large steps at the start before gradients stabilise.
+    # Falls back to AdamW8bit (memory-efficient), then plain AdamW.
+    _using_prodigy = False
     try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(
+        from prodigyopt import Prodigy
+        optimizer = Prodigy(
             unet.parameters(),
-            lr=learning_rate,
+            lr=1.0,
             weight_decay=1e-2,
+            d_coef=1.0,
+            use_bias_correction=True,
+            safeguard_warmup=True,
         )
-        _emit("Using AdamW8bit optimizer.")
+        _using_prodigy = True
+        _emit("Optimizer: Prodigy (adaptive, no LR tuning needed — Mishchenko & Malitsky 2023)")
     except ImportError:
-        optimizer = torch.optim.AdamW(
-            unet.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-2,
-        )
-        _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Optimizer: AdamW8bit (install prodigy-opt for automatic LR tuning)")
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Optimizer: AdamW (install prodigy-opt or bitsandbytes for better options)")
 
-    # Cosine LR scheduler with warmup
+    # Cosine LR scheduler with warmup.
+    # Prodigy adapts its own step size, so we apply a mild cosine decay on the
+    # nominal lr (1.0 → 0.1) to reduce the effective scale as training converges.
+    # For AdamW variants the cosine schedule runs over the full LR range.
     warmup_steps = max(50, steps // 20)
     from torch.optim.lr_scheduler import CosineAnnealingLR
-    scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    _cosine_eta_min = 0.1 if _using_prodigy else learning_rate * 0.1
+    scheduler = CosineAnnealingLR(optimizer, T_max=max(1, steps - warmup_steps), eta_min=_cosine_eta_min)
 
     # ── Step 6: Training loop ───────────────────────────────────────────────────────────
 
@@ -357,8 +389,10 @@ def run_training(
                 scheduler.step()
             optimizer.zero_grad()
 
-        # Warmup (linear)
-        if global_step <= warmup_steps:
+        # Warmup (linear) — only for non-Prodigy optimizers.
+        # Prodigy uses safeguard_warmup internally; overriding its lr here
+        # would interfere with its adaptive step-size estimation.
+        if not _using_prodigy and global_step <= warmup_steps:
             warmup_lr = learning_rate * (global_step / warmup_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
