@@ -40,11 +40,24 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
     if _pipeline is not None:
         return
 
-
     device, dtype = _get_device_and_dtype()
 
     if not model_id:
         model_id = WAN_MODEL_ID
+
+    # Wan2.1 requires ~28 GB of VRAM.  On cards with less, fall back
+    # automatically to CogVideoX-5b-I2V (~10 GB) so video generation
+    # works rather than crashing with an OOM error.
+    if "Wan" in model_id and device == "cuda":
+        import torch
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        if vram_gb < 24.0:
+            log.warning(
+                "GPU has %.1f GB VRAM — Wan2.1 requires ~28 GB. "
+                "Automatically switching to CogVideoX-5b-I2V (~10 GB).",
+                vram_gb,
+            )
+            model_id = COGVIDEO_MODEL_ID
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -112,7 +125,8 @@ def generate_video(
         image_path:   Source image to animate.
         prompt:       Motion/scene description.
         output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
+        model_id:     HuggingFace model ID (defaults to Wan2.1; auto-falls
+                      back to CogVideoX on GPUs with <24 GB VRAM).
         hf_token:     HuggingFace token for model download.
         num_frames:   Number of video frames to generate.
         steps:        Diffusion inference steps.

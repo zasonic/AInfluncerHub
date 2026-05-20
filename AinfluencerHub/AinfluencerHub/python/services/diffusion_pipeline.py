@@ -54,6 +54,20 @@ def _load_base_pipeline(hf_token: str = ""):
     )
     _pipeline.to(device)
 
+    # DPM-Solver++ SDE with Karras sigmas: measurably better portrait
+    # sharpness than SDXL's default Euler at the same 20 inference steps.
+    # Falls back silently to the checkpoint default on any import error.
+    try:
+        from diffusers import DPMSolverMultistepScheduler
+        _pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
+            _pipeline.scheduler.config,
+            algorithm_type="sde-dpmsolver++",
+            use_karras_sigmas=True,
+        )
+        log.info("Scheduler: DPM-Solver++ SDE (Karras sigmas)")
+    except Exception as _sched_err:
+        log.warning("DPM-Solver++ scheduler unavailable (%s); using checkpoint default.", _sched_err)
+
     # Enable memory optimizations
     if device == "cuda":
         try:
@@ -147,7 +161,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
@@ -192,7 +206,7 @@ def generate_dataset(
                     negative_prompt="blurry, low quality, watermark, text, deformed",
                     ip_adapter_image=face_image,
                     num_inference_steps=20,
-                    guidance_scale=4.0,
+                    guidance_scale=7.5,
                     width=832,
                     height=1216,
                     generator=generator,
@@ -223,7 +237,7 @@ def generate_image(
     width: int = 832,
     height: int = 1216,
     steps: int = 20,
-    cfg: float = 4.0,
+    cfg: float = 7.5,
     seed: int = -1,
     output_dir: Path | None = None,
     hf_token: str = "",
