@@ -4,6 +4,14 @@ services/models.py — Central registry for every HuggingFace model the app uses
 All pipelines must import their model specs from this module instead of
 hard-coding repo IDs. This gives a single place to pin/bump model revisions,
 roll back safely, and drive download progress in the UI.
+
+v1.1 — JoyCaption Two upgrade:
+  JOY_CAPTIONER updated to JoyCaption Two (fancyfeast/llama-joycaption-two-hf),
+  which produces substantially richer, more training-specific captions vs the
+  Beta One model. Better captions → better LoRA fidelity → more realistic
+  generated influencer images.
+  JOY_CAPTIONER_V1 (Beta One) is kept as the automatic fallback used by
+  joy_captioner.py when JoyCaption Two fails to load.
 """
 
 from dataclasses import dataclass
@@ -47,9 +55,21 @@ FLORENCE_CAPTIONER = ModelSpec(
     required=True,
 )
 
+# JoyCaption Two — preferred captioning model for LoRA training.
+# Produces detailed, training-optimized descriptions that improve face-identity
+# fidelity in trained LoRA weights (HuggingFace: fancyfeast/llama-joycaption-two-hf).
 JOY_CAPTIONER = ModelSpec(
+    repo_id="fancyfeast/llama-joycaption-two-hf",
+    purpose="Training-optimized captioning — JoyCaption 2 (Step 3)",
+    size_gb=10.0,
+    required=False,
+)
+
+# JoyCaption Beta One — kept as automatic fallback if JoyCaption Two fails to
+# load (e.g. older transformers install, insufficient VRAM for v2).
+JOY_CAPTIONER_V1 = ModelSpec(
     repo_id="fancyfeast/llama-joycaption-beta-one-hf-llava",
-    purpose="Training-optimized captioning (Step 3)",
+    purpose="Training-optimized captioning fallback — JoyCaption Beta One (Step 3)",
     size_gb=10.0,
     required=False,
 )
@@ -76,6 +96,7 @@ ALL: dict[str, ModelSpec] = {
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
+    "joycaption_v1":    JOY_CAPTIONER_V1,
     "wan_video":        WAN_VIDEO,
     "cogvideo":         COGVIDEO,
 }

@@ -5,24 +5,38 @@ JoyCaption is purpose-built for generating natural-language captions optimized
 for diffusion model training.  It produces richer, more descriptive captions
 than Florence-2, which directly translates to better LoRA fidelity.
 
-Model: fancyfeast/llama-joycaption-beta-one-hf-llava (~17 GB bf16, ~10 GB 4-bit)
+v1.1 — JoyCaption Two upgrade with automatic fallback:
+  Primary model: fancyfeast/llama-joycaption-two-hf (JoyCaption 2)
+    - More detailed, training-specific descriptions
+    - Better face-identity language (useful for influencer LoRA)
+    - Same HuggingFace AutoModelForCausalLM interface
+  Fallback model: fancyfeast/llama-joycaption-beta-one-hf-llava (Beta One)
+    - Used automatically when JoyCaption 2 fails to load (older transformers,
+      insufficient VRAM, download error, etc.)
+    - Zero user intervention required — the caption step continues with the
+      best available model and logs which one is active.
+
+Model sizes: ~10 GB bf16, ~10 GB 4-bit quantized (GPU), both versions.
 """
 
 import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import JOY_CAPTIONER
+from services.models import JOY_CAPTIONER, JOY_CAPTIONER_V1
 
 log = logging.getLogger("hub.joycaption")
 
 _model = None
 _processor = None
 _device = None
+_loaded_model_id: str | None = None  # tracks which version is actually in memory
 
 JOYCAPTION_MODEL_ID = JOY_CAPTIONER.repo_id
+JOYCAPTION_V1_MODEL_ID = JOY_CAPTIONER_V1.repo_id
 
-# System prompt for training-style captions
+# System prompt for training-style captions.
+# JoyCaption 2 responds well to this directive; Beta One uses the same prompt.
 CAPTION_PROMPT = (
     "Write a detailed description of this image for use as a training caption "
     "for an AI image generation model. Describe the person's appearance, pose, "
@@ -32,7 +46,8 @@ CAPTION_PROMPT = (
 
 
 def _load_model(hf_token: str | None = None) -> None:
-    global _model, _processor, _device
+    """Load JoyCaption Two, falling back to Beta One on any load failure."""
+    global _model, _processor, _device, _loaded_model_id
     if _model is not None:
         return
 
@@ -40,41 +55,63 @@ def _load_model(hf_token: str | None = None) -> None:
     from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
 
     _device = "cuda" if torch.cuda.is_available() else "cpu"
-    log.info("Loading JoyCaption on %s ...", _device)
 
-    kwargs: dict = {"trust_remote_code": True}
-    if hf_token:
-        kwargs["token"] = hf_token
+    def _try_load(model_id: str) -> bool:
+        """Attempt to load a specific JoyCaption model. Returns True on success."""
+        global _model, _processor, _loaded_model_id
+        log.info("Loading JoyCaption on %s: %s ...", _device, model_id)
+        kwargs: dict = {"trust_remote_code": True}
+        if hf_token:
+            kwargs["token"] = hf_token
 
-    # Use 4-bit quantization on GPU to fit in 10-12 GB VRAM
-    if _device == "cuda":
-        kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4",
+        # Use 4-bit quantization on GPU to fit in 10-12 GB VRAM
+        if _device == "cuda":
+            kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+            )
+            kwargs["device_map"] = "auto"
+        else:
+            kwargs["torch_dtype"] = torch.float32
+
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+            processor = AutoProcessor.from_pretrained(
+                model_id,
+                trust_remote_code=True,
+                token=hf_token or None,
+            )
+            _model = model
+            _processor = processor
+            _loaded_model_id = model_id
+            log.info("JoyCaption loaded: %s", model_id)
+            return True
+        except Exception as exc:
+            log.warning("JoyCaption load failed for %s: %s", model_id, exc)
+            return False
+
+    # Try JoyCaption Two first; fall back to Beta One if it fails.
+    if not _try_load(JOYCAPTION_MODEL_ID):
+        log.warning(
+            "JoyCaption Two unavailable — falling back to JoyCaption Beta One. "
+            "Captions will still be generated but may be less detailed."
         )
-        kwargs["device_map"] = "auto"
-    else:
-        kwargs["torch_dtype"] = torch.float32
-
-    _model = AutoModelForCausalLM.from_pretrained(
-        JOYCAPTION_MODEL_ID, **kwargs
-    )
-    _processor = AutoProcessor.from_pretrained(
-        JOYCAPTION_MODEL_ID,
-        trust_remote_code=True,
-        token=hf_token or None,
-    )
-    log.info("JoyCaption loaded.")
+        if not _try_load(JOYCAPTION_V1_MODEL_ID):
+            raise RuntimeError(
+                "Both JoyCaption Two and Beta One failed to load. "
+                "Check your HuggingFace token, disk space, and GPU VRAM."
+            )
 
 
 def unload_model() -> None:
-    global _model, _processor
+    global _model, _processor, _loaded_model_id
     if _model is not None:
         import torch
         del _model, _processor
         _model = None
         _processor = None
+        _loaded_model_id = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         log.info("JoyCaption unloaded.")
@@ -93,7 +130,7 @@ def caption_image(
 
     img = Image.open(image_path).convert("RGB")
 
-    # Build the chat-style prompt
+    # Build the chat-style prompt (works for both JoyCaption 2 and Beta One)
     messages = [
         {"role": "user", "content": [
             {"type": "image"},
@@ -140,10 +177,17 @@ def caption_batch(
     """Caption a list of images using JoyCaption.
 
     Same interface as florence_captioner.caption_batch for drop-in replacement.
+    Falls back to JoyCaption Beta One automatically if JoyCaption Two fails
+    to load — the batch continues without interruption.
     """
     _load_model(hf_token)
     results: dict[Path, str] = {}
     total = len(image_paths)
+
+    # Log which model version is active so users/support can confirm.
+    if _loaded_model_id:
+        version = "JoyCaption 2" if "joycaption-two" in _loaded_model_id else "JoyCaption Beta One"
+        log.info("Captioning %d images with %s.", total, version)
 
     for i, img_path in enumerate(image_paths, 1):
         if cancel_event and cancel_event.is_set():

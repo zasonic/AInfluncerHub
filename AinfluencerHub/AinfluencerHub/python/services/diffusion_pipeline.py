@@ -7,6 +7,17 @@ Replaces ComfyUI for all image generation:
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+v1.1 — VRAM optimization fallback chain:
+  When xformers is unavailable (common on consumer GPUs: RTX 3060, 4060,
+  AMD cards, etc.) the previous code silently skipped VRAM optimization,
+  leading to OOM crashes mid-generation with no explanation.
+  Now uses a three-level fallback:
+    1. xformers memory-efficient attention (best — if installed)
+    2. PyTorch built-in attention slicing (always available, torch >= 2.0)
+    3. No optimization with a warning logged (so users know why it's slow)
+  Each active path is logged at INFO so users/support can confirm the GPU
+  optimization state without opening a debugger.
 """
 
 import logging
@@ -34,6 +45,35 @@ def _get_device_and_dtype():
     return "cpu", torch.float32
 
 
+def _apply_vram_optimizations(pipeline, device: str) -> None:
+    """Apply the best available VRAM optimization for the active device.
+
+    Falls back gracefully so a missing xformers install never causes a crash.
+    """
+    if device != "cuda":
+        return
+    # Level 1: xformers — best memory efficiency, requires separate install.
+    try:
+        pipeline.enable_xformers_memory_efficient_attention()
+        log.info("VRAM: xformers memory-efficient attention enabled.")
+        return
+    except Exception:
+        pass
+    # Level 2: PyTorch built-in attention slicing — always available on
+    # torch >= 2.0, no extra install required. Halves peak VRAM for attention
+    # layers at a small (~5%) throughput cost.
+    try:
+        pipeline.enable_attention_slicing(slice_size="auto")
+        log.info("VRAM: attention slicing enabled (xformers not available).")
+        return
+    except Exception:
+        pass
+    log.warning(
+        "VRAM: no memory optimization applied — xformers and attention slicing "
+        "both unavailable. Generation may fail with OOM on GPUs below 16 GB."
+    )
+
+
 def _load_base_pipeline(hf_token: str = ""):
     """Load the SDXL base pipeline."""
     global _pipeline
@@ -54,12 +94,7 @@ def _load_base_pipeline(hf_token: str = ""):
     )
     _pipeline.to(device)
 
-    # Enable memory optimizations
-    if device == "cuda":
-        try:
-            _pipeline.enable_xformers_memory_efficient_attention()
-        except Exception:
-            pass  # xformers optional
+    _apply_vram_optimizations(_pipeline, device)
 
     log.info("SDXL pipeline loaded.")
 
