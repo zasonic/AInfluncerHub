@@ -60,12 +60,15 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
         )
         _pipeline_type = "cogvideo"
     else:
-        # Wan2.1 pipeline
-        from diffusers import AutoPipelineForVideoGeneration
-
-        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
-            model_id, **kwargs
-        )
+        # Wan2.1 I2V pipeline — use explicit class so the model's image
+        # conditioning is always wired up. Falls back to AutoPipeline on older
+        # diffusers builds where WanImageToVideoPipeline isn't exported yet.
+        try:
+            from diffusers import WanImageToVideoPipeline
+            _pipeline = WanImageToVideoPipeline.from_pretrained(model_id, **kwargs)
+        except ImportError:
+            from diffusers import AutoPipelineForVideoGeneration
+            _pipeline = AutoPipelineForVideoGeneration.from_pretrained(model_id, **kwargs)
         _pipeline_type = "wan"
 
     # Enable CPU offloading for large models

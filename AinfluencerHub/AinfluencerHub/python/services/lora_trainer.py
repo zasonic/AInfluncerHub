@@ -191,8 +191,12 @@ def run_training(
             self.tokenizer_1 = tokenizer_1
             self.tokenizer_2 = tokenizer_2
             self.transform = transforms.Compose([
-                transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(resolution),
+                # Resize directly to square — preserves the full face on portrait
+                # images, which CenterCrop-after-resize would crop to torso/head only.
+                transforms.Resize(
+                    (resolution, resolution),
+                    interpolation=transforms.InterpolationMode.BILINEAR,
+                ),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
