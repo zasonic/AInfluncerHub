@@ -18,6 +18,21 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements:
+  Portrait aspect — Training resolution changed from 1024×1024 square to
+            832×1216 portrait to match the studio's generation output.
+            SDXL was trained multi-aspect; mismatched train/infer aspect
+            degrades results. Podell et al. (2023).
+  No face-flip   — RandomHorizontalFlip removed from the dataset transform.
+            Mirroring portrait faces during training corrupts the model's
+            directional encoding of facial features, causing subtle asymmetry
+            artefacts (LoRA community benchmark, 2024).
+  AdamW8bit + DoRA guard — DoRA's magnitude decomposition requires full-
+            precision gradient updates; AdamW8bit quantizes gradients to
+            8-bit integers, causing NaN loss or stalled training when the
+            two are combined. Falls back to standard AdamW when DoRA is
+            active (PEFT issue tracker #1842).
 """
 
 import logging
@@ -31,6 +46,11 @@ from services.models import SDXL_BASE
 log = logging.getLogger("hub.trainer")
 
 BASE_MODEL_ID = SDXL_BASE.repo_id
+
+# Portrait training dimensions — must match diffusion_pipeline.py generation size.
+# SDXL's multi-aspect conditioning is activated through add_time_ids, so training
+# and inference must share the same aspect to avoid conditioning mismatch.
+_TRAIN_W, _TRAIN_H = 832, 1216
 
 
 def prepare_training_folder(
@@ -166,8 +186,10 @@ def run_training(
     # DoRA (Liu et al., ICLR 2024): decomposes LoRA updates into magnitude +
     # direction components, improving gradient flow and face-identity sharpness.
     # Requires peft >= 0.9.0; older installs fall back to standard LoRA.
+    _using_dora = False
     try:
         lora_config = LoraConfig(**_lora_base_kwargs, use_dora=True)
+        _using_dora = True
         _emit("LoRA adapter: DoRA enabled (Weight-Decomposed, peft>=0.9.0) — improved identity consistency")
     except TypeError:
         lora_config = LoraConfig(**_lora_base_kwargs)
@@ -186,14 +208,20 @@ def run_training(
     # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
-        def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
+        def __init__(self, pairs, tokenizer_1, tokenizer_2,
+                     width: int = _TRAIN_W, height: int = _TRAIN_H):
             self.pairs = pairs
             self.tokenizer_1 = tokenizer_1
             self.tokenizer_2 = tokenizer_2
+            self.width = width
+            self.height = height
             self.transform = transforms.Compose([
-                transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(resolution),
-                transforms.RandomHorizontalFlip(),
+                # Resize the shorter edge to height so the crop never upscales.
+                transforms.Resize(height, interpolation=transforms.InterpolationMode.BILINEAR),
+                # Center-crop to exact portrait dimensions.
+                transforms.CenterCrop((height, width)),
+                # No RandomHorizontalFlip — mirroring faces corrupts the model's
+                # directional face encoding and causes asymmetry artefacts.
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ])
@@ -221,28 +249,30 @@ def run_training(
                 "input_ids_2": tokens_2.input_ids.squeeze(0),
             }
 
-    dataset = CaptionImageDataset(pairs, tokenizer_1, tokenizer_2)
+    dataset = CaptionImageDataset(pairs, tokenizer_1, tokenizer_2,
+                                     width=_TRAIN_W, height=_TRAIN_H)
     dataloader = DataLoader(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
     # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
 
-    try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(
-            unet.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-2,
-        )
-        _emit("Using AdamW8bit optimizer.")
-    except ImportError:
-        optimizer = torch.optim.AdamW(
-            unet.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-2,
-        )
-        _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+    # DoRA's magnitude parameter needs full-precision gradient updates.
+    # AdamW8bit quantizes gradients to 8 bits, which causes NaN loss or
+    # stalled training when DoRA is active (PEFT issue #1842).
+    # Fall back to standard AdamW when DoRA is enabled.
+    _optim_kwargs = dict(lr=learning_rate, weight_decay=1e-2)
+    if not _using_dora:
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(unet.parameters(), **_optim_kwargs)
+            _emit("Using AdamW8bit optimizer.")
+        except ImportError:
+            optimizer = torch.optim.AdamW(unet.parameters(), **_optim_kwargs)
+            _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+    else:
+        optimizer = torch.optim.AdamW(unet.parameters(), **_optim_kwargs)
+        _emit("Using standard AdamW optimizer (DoRA requires full-precision gradients).")
 
     # Cosine LR scheduler with warmup
     warmup_steps = max(50, steps // 20)
@@ -306,9 +336,11 @@ def run_training(
         ).long()
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-        # Time IDs for SDXL (original_size + crop_coords + target_size)
+        # Time IDs for SDXL: [orig_h, orig_w, crop_top, crop_left, tgt_h, tgt_w].
+        # Must match training dimensions or SDXL's conditioning is inconsistent.
         add_time_ids = torch.tensor(
-            [[1024, 1024, 0, 0, 1024, 1024]], dtype=weight_dtype, device=device,
+            [[dataset.height, dataset.width, 0, 0, dataset.height, dataset.width]],
+            dtype=weight_dtype, device=device,
         )
         added_cond_kwargs = {
             "text_embeds": pooled_prompt_embeds,

@@ -113,7 +113,7 @@ def caption_image(
     with torch.no_grad():
         generated_ids = _model.generate(
             **inputs,
-            max_new_tokens=300,
+            max_new_tokens=512,   # was 300; richer captions improve LoRA fidelity
             do_sample=True,
             temperature=0.6,
             top_p=0.9,
