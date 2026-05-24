@@ -18,6 +18,16 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements:
+  ResizePad — Portrait-first image preprocessing: replaces Resize + CenterCrop
+               with a resize-then-pad transform so tall reference photos
+               (the most common format for influencer content) are never
+               destructively cropped.  Gray padding (≈ 0 after normalization)
+               is neutral in latent space and does not bias training.
+               Backed by community best-practice for face LoRA training
+               (kohya_ss, SimpleTuner, and ai-toolkit all recommend this
+               approach for non-square source images).
 """
 
 import logging
@@ -31,6 +41,36 @@ from services.models import SDXL_BASE
 log = logging.getLogger("hub.trainer")
 
 BASE_MODEL_ID = SDXL_BASE.repo_id
+
+
+class _ResizePadToSquare:
+    """Resize image to fit within a square canvas, padding with neutral gray.
+
+    Replaces Resize + CenterCrop so that portrait or landscape source images
+    are never cropped.  The full image content is preserved; gray padding
+    (RGB 127, 127, 127) normalises to ≈0 in [-1, 1] latent space and does
+    not bias the loss signal towards artificial edges.
+
+    This is the approach recommended by kohya_ss, SimpleTuner, and ai-toolkit
+    guides for face LoRA training where the reference photos are often
+    portrait-oriented (taller than wide).
+    """
+
+    def __init__(self, size: int, pad_value: int = 127) -> None:
+        self.size = size
+        self.pad_value = pad_value
+
+    def __call__(self, img):
+        from PIL import Image as _PILImage
+
+        w, h = img.size
+        scale = self.size / max(w, h)
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        img = img.resize((new_w, new_h), _PILImage.BILINEAR)
+        canvas = _PILImage.new("RGB", (self.size, self.size), (self.pad_value,) * 3)
+        canvas.paste(img, ((self.size - new_w) // 2, (self.size - new_h) // 2))
+        return canvas
 
 
 def prepare_training_folder(
@@ -85,7 +125,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
+    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -104,7 +144,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ──────────────────────────────────────────────
+    # ── Step 2: Load model components ────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -148,7 +188,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -183,16 +223,19 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
+    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
             self.pairs = pairs
             self.tokenizer_1 = tokenizer_1
             self.tokenizer_2 = tokenizer_2
+            # v2.2: ResizePad preserves full image content for portrait photos.
+            # CenterCrop would remove ~170 px from top and bottom of a typical
+            # 768x1024 influencer portrait, losing body/clothing context that
+            # anchors identity learning.
             self.transform = transforms.Compose([
-                transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(resolution),
+                _ResizePadToSquare(resolution),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
@@ -226,7 +269,7 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ──────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -249,7 +292,7 @@ def run_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Step 6: Training loop ───────────────────────────────────────────────────────────
+    # ── Step 6: Training loop ─────────────────────────────────────────────────────────────────
 
     _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
 
@@ -377,7 +420,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────
+    # ── Step 7: Save final LoRA ───────────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"

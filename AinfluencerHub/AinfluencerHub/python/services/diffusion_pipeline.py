@@ -120,11 +120,44 @@ def _extract_face_embedding(image_path: Path):
 
 
 def _prepare_face_image(image_path: Path):
-    """Load and prepare a face image for IP-Adapter."""
-    from PIL import Image
+    """Load and prepare a face image for IP-Adapter.
 
-    img = Image.open(image_path).convert("RGB")
-    return img
+    When InsightFace detects a face, crops to a padded face region so the
+    IP-Adapter CLIP encoder focuses on identity-bearing pixels rather than
+    background or clothing.  Falls back to the full image on any error,
+    so a difficult reference photo (occluded face, unusual angle) is never
+    a hard failure.
+    """
+    import numpy as np
+    from PIL import Image as _PILImage
+
+    img_pil = _PILImage.open(image_path).convert("RGB")
+
+    try:
+        import cv2
+
+        app = _get_face_app()
+        img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        faces = app.get(img_cv)
+        if faces:
+            face = max(
+                faces,
+                key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
+            )
+            x1, y1, x2, y2 = (int(c) for c in face.bbox)
+            w, h = img_pil.size
+            # Expand 50 % around the face so hair, chin, and shoulders are
+            # included — these cues help IP-Adapter identify the person.
+            pad = int(max(x2 - x1, y2 - y1) * 0.5)
+            x1 = max(0, x1 - pad)
+            y1 = max(0, y1 - pad)
+            x2 = min(w, x2 + pad)
+            y2 = min(h, y2 + pad)
+            return img_pil.crop((x1, y1, x2, y2))
+    except Exception:
+        pass  # safe fallback: full image
+
+    return img_pil
 
 
 def unload() -> None:
@@ -147,7 +180,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
