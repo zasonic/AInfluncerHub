@@ -5,7 +5,11 @@ JoyCaption is purpose-built for generating natural-language captions optimized
 for diffusion model training.  It produces richer, more descriptive captions
 than Florence-2, which directly translates to better LoRA fidelity.
 
-Model: fancyfeast/llama-joycaption-beta-one-hf-llava (~17 GB bf16, ~10 GB 4-bit)
+Model: fancyfeast/llama-joycaption-alpha-two-hf-llava (~10 GB 4-bit on GPU).
+Alpha Two (Oct 2024) improves instruction following and caption accuracy over
+beta-one, producing more precise training captions for better LoRA quality.
+The system-message format is required for Alpha Two; a bare user-only fallback
+is tried automatically for older or differently-configured checkpoints.
 """
 
 import logging
@@ -22,12 +26,17 @@ _device = None
 
 JOYCAPTION_MODEL_ID = JOY_CAPTIONER.repo_id
 
-# System prompt for training-style captions
+# Alpha Two's system prompt activates its training-caption mode.
+_SYSTEM_PROMPT = "You are a helpful image captioner."
+
+# Descriptive prompt that takes advantage of Alpha Two's improved instruction
+# following — asks for structured detail useful in diffusion training captions.
 CAPTION_PROMPT = (
-    "Write a detailed description of this image for use as a training caption "
-    "for an AI image generation model. Describe the person's appearance, pose, "
-    "expression, clothing, and the setting. Be specific and use natural language. "
-    "Do not start with 'The image shows' or 'This is'. Just describe what you see."
+    "Write a detailed training caption for this image. Describe the subject's "
+    "physical appearance (hair, eyes, skin tone, facial features), expression, "
+    "pose, clothing and accessories, and the background/setting. Use natural, "
+    "specific language suitable for a text-to-image model. Begin directly with "
+    "the description — no preamble like 'The image shows' or 'This is a photo'."
 )
 
 
@@ -80,6 +89,38 @@ def unload_model() -> None:
         log.info("JoyCaption unloaded.")
 
 
+def _build_prompt_text(img) -> str:
+    """
+    Build the tokenised prompt for Alpha Two using a system + user message.
+
+    Falls back to the user-only format if the processor's chat template does
+    not support system roles (e.g., older or non-Llama-3 checkpoints).  Either
+    way the final prompt is identical to what the model expects at generation.
+    """
+    messages_with_system = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": [
+            {"type": "image"},
+            {"type": "text", "text": CAPTION_PROMPT},
+        ]},
+    ]
+    try:
+        return _processor.apply_chat_template(
+            messages_with_system, add_generation_prompt=True
+        )
+    except Exception:
+        # Older processor / chat template that doesn't support system roles.
+        messages_user_only = [
+            {"role": "user", "content": [
+                {"type": "image"},
+                {"type": "text", "text": CAPTION_PROMPT},
+            ]},
+        ]
+        return _processor.apply_chat_template(
+            messages_user_only, add_generation_prompt=True
+        )
+
+
 def caption_image(
     image_path: Path,
     trigger_word: str = "",
@@ -93,17 +134,7 @@ def caption_image(
 
     img = Image.open(image_path).convert("RGB")
 
-    # Build the chat-style prompt
-    messages = [
-        {"role": "user", "content": [
-            {"type": "image"},
-            {"type": "text", "text": CAPTION_PROMPT},
-        ]},
-    ]
-
-    prompt_text = _processor.apply_chat_template(
-        messages, add_generation_prompt=True
-    )
+    prompt_text = _build_prompt_text(img)
     inputs = _processor(
         text=prompt_text,
         images=img,
