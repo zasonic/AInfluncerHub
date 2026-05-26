@@ -213,7 +213,7 @@ async def generate_dataset_images(
             from services.diffusion_pipeline import generate_dataset
             hf_token = settings.get("hf_token", "")
             generate_dataset(
-                reference_image=refs[0],
+                reference_images=refs,
                 prompts=prompts,
                 trigger_word=proj.trigger_word,
                 output_dir=proj.dataset_dir,
@@ -252,7 +252,6 @@ def get_captions(slug: str):
     result: dict[str, str] = {}
     for txt in proj.captions_dir.glob("*.txt"):
         result[txt.stem] = txt.read_text(encoding="utf-8").strip()
-    # Also pick up any .txt files sitting beside dataset images
     for txt in proj.dataset_dir.glob("*.txt"):
         if txt.stem not in result:
             result[txt.stem] = txt.read_text(encoding="utf-8").strip()
@@ -341,7 +340,7 @@ async def start_training(
     slug:     str,
     hf_token: str = Query(""),
     steps:    int = Query(2000),
-    rank:     int = Query(16),
+    rank:     int = Query(32),
     lr:       str = Query("1e-4"),
 ):
     """Start native LoRA training using diffusers + peft."""
@@ -356,7 +355,6 @@ async def start_training(
     with _cancel_lock:
         _cancel_events[slug] = cancel
 
-    # Save settings for next time
     settings.update({
         "hf_token":        hf_token,
         "training_steps":  steps,
@@ -609,5 +607,5 @@ if __name__ == "__main__":
         app,
         host=args.host,
         port=args.port,
-        log_level="warning",   # suppress access log spam
+        log_level="warning",
     )

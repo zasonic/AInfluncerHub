@@ -31,11 +31,23 @@ SDXL_BASE = ModelSpec(
     required=True,
 )
 
+# IP-Adapter FaceID: uses InsightFace biometric embeddings for face identity
+# conditioning — significantly better identity preservation than the Plus-Face
+# CLIP-image approach (Ye et al., arXiv:2401.15011).
+IP_ADAPTER_FACEID = ModelSpec(
+    repo_id="h94/IP-Adapter-FaceID",
+    purpose="Face identity-consistent dataset generation via InsightFace (Step 2)",
+    size_gb=0.3,
+    required=True,
+    weight_name="ip-adapter-faceid_sdxl.bin",
+)
+
+# Plus-Face variant kept as automatic fallback if FaceID is unavailable.
 IP_ADAPTER = ModelSpec(
     repo_id="h94/IP-Adapter",
-    purpose="Face-consistent dataset generation (Step 2)",
+    purpose="Face-consistent dataset generation — Plus-Face fallback (Step 2)",
     size_gb=1.8,
-    required=True,
+    required=False,
     subfolder="sdxl_models",
     weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors",
 )
@@ -72,12 +84,13 @@ COGVIDEO = ModelSpec(
 # ── Public API ───────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
-    "sdxl_base":        SDXL_BASE,
-    "ip_adapter":       IP_ADAPTER,
-    "florence":         FLORENCE_CAPTIONER,
-    "joycaption":       JOY_CAPTIONER,
-    "wan_video":        WAN_VIDEO,
-    "cogvideo":         COGVIDEO,
+    "sdxl_base":         SDXL_BASE,
+    "ip_adapter_faceid": IP_ADAPTER_FACEID,
+    "ip_adapter":        IP_ADAPTER,
+    "florence":          FLORENCE_CAPTIONER,
+    "joycaption":        JOY_CAPTIONER,
+    "wan_video":         WAN_VIDEO,
+    "cogvideo":          COGVIDEO,
 }
 
 
