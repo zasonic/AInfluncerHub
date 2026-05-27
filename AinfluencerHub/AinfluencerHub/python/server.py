@@ -244,6 +244,31 @@ def score_dataset(slug: str):
     passed = [r for r in results if r["passed"]]
     return {"scores": results, "passed": len(passed), "total": len(results)}
 
+
+@app.post("/api/dataset/{slug}/filter")
+def filter_dataset(slug: str):
+    """Move images that fail quality thresholds to a rejected/ sub-folder (non-destructive)."""
+    proj = _load_project(slug)
+    images = proj.dataset_images()
+    if not images:
+        raise HTTPException(400, "No dataset images to filter.")
+    from services.quality_scorer import score_images
+    results = score_images(images)
+    rejected_dir = proj.dataset_dir / "rejected"
+    rejected_dir.mkdir(exist_ok=True)
+    moved = 0
+    for r in results:
+        if not r["passed"]:
+            src = Path(r["path"])
+            if src.exists():
+                dst = rejected_dir / src.name
+                src.rename(dst)
+                moved += 1
+    remaining = len(proj.dataset_images())
+    proj.set("dataset_count", remaining)
+    proj.save()
+    return {"moved": moved, "remaining": remaining}
+
 # ── Captions ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/captions/{slug}")

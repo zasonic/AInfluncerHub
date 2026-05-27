@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Upload, ShieldCheck } from "lucide-react";
+import { Upload, ShieldCheck, Trash2 } from "lucide-react";
 import { useStore } from "../store";
 import * as api from "../api";
 import type { ImageScore } from "../api";
@@ -34,8 +34,9 @@ export function Step2Dataset({ onAdvance }: Props) {
   );
   const [count,   setCount]   = useState(25);
   const [images,  setImages]  = useState<{ path: string; filename: string }[]>([]);
-  const [scoring, setScoring] = useState(false);
-  const [scores,  setScores]  = useState<ImageScore[] | null>(null);
+  const [scoring,   setScoring]   = useState(false);
+  const [scores,    setScores]    = useState<ImageScore[] | null>(null);
+  const [filtering, setFiltering] = useState(false);
 
   const op  = useAsyncOperation();
   const sse = useSSE({
@@ -98,6 +99,26 @@ export function Step2Dataset({ onAdvance }: Props) {
       op.fail(String(e));
     } finally {
       setScoring(false);
+    }
+  };
+
+  const runFilter = async () => {
+    if (!activeProject) return;
+    setFiltering(true);
+    try {
+      const result = await api.filterDataset(activeProject.slug);
+      const { images: imgs } = await api.getDatasetImages(activeProject.slug);
+      setImages(imgs.map((p) => ({ path: p, filename: p.split(/[\\/]/).pop() ?? p })));
+      setScores(null);
+      op.setProgress(
+        result.remaining,
+        result.remaining,
+        `${result.moved} low-quality image${result.moved !== 1 ? "s" : ""} moved to rejected/. ${result.remaining} remain.`,
+      );
+    } catch (e) {
+      op.fail(String(e));
+    } finally {
+      setFiltering(false);
     }
   };
 
@@ -241,11 +262,23 @@ export function Step2Dataset({ onAdvance }: Props) {
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={runScoring}
-                    disabled={scoring || running}
+                    disabled={scoring || filtering || running}
                   >
                     <ShieldCheck size={13} />
                     {scoring ? "Scoring..." : "Score quality"}
                   </button>
+                  {scores && scores.some((s) => !s.passed) && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={runFilter}
+                      disabled={filtering || scoring || running}
+                    >
+                      <Trash2 size={13} />
+                      {filtering
+                        ? "Filtering..."
+                        : `Remove ${scores.filter((s) => !s.passed).length} low-quality`}
+                    </button>
+                  )}
                 </div>
               </div>
               <ImageGallery

@@ -128,6 +128,11 @@ export const scoreDataset = (slug: string) =>
     "POST", `/api/dataset/${slug}/score`
   );
 
+export const filterDataset = (slug: string) =>
+  request<{ moved: number; remaining: number }>(
+    "POST", `/api/dataset/${slug}/filter`
+  );
+
 /** Returns an EventSource streaming SSE progress events */
 export const startCaptioning = (
   slug: string,
