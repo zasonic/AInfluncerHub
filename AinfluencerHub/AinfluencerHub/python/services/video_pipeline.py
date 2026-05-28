@@ -5,6 +5,14 @@ Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
 Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
 
 All operations run locally on the user's GPU without external services.
+
+VRAM-aware model selection (added):
+  Wan2.1 14B requires ~20 GB VRAM to run comfortably. On GPUs below this
+  threshold the pipeline automatically selects CogVideoX 5B I2V (~10 GB)
+  instead. Users are notified via progress_cb before any slow download
+  starts so there are no silent surprises. The explicit model_id parameter
+  always takes precedence, allowing the user to override the auto-selection
+  from the UI.
 """
 
 import logging
@@ -18,6 +26,10 @@ log = logging.getLogger("hub.video")
 
 WAN_MODEL_ID = WAN_VIDEO.repo_id
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
+
+# Wan2.1 14B needs roughly this much VRAM to run without heavy swapping.
+# CogVideoX 5B I2V is used as the automatic fallback below this threshold.
+_WAN_MIN_VRAM_GB = 20.0
 
 # Lazy global
 _pipeline = None
@@ -33,18 +45,56 @@ def _get_device_and_dtype():
     return "cpu", torch.float32
 
 
-def _load_pipeline(model_id: str = "", hf_token: str = ""):
+def _available_vram_gb() -> float:
+    """Return total GPU VRAM in GB, or 0 if no CUDA GPU is present."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _resolve_model_id(
+    requested: str,
+    progress_cb: Callable[[str], None] | None,
+) -> str:
+    """
+    Return the model ID to load.
+
+    If the caller explicitly requested a model, honour it unchanged.
+    Otherwise, check available VRAM: if below _WAN_MIN_VRAM_GB, fall
+    back to CogVideoX and tell the user why via progress_cb.
+    """
+    if requested:
+        return requested
+
+    vram = _available_vram_gb()
+    if vram > 0 and vram < _WAN_MIN_VRAM_GB:
+        msg = (
+            f"Your GPU has {vram:.1f} GB VRAM. "
+            f"Wan2.1 14B needs ~{_WAN_MIN_VRAM_GB:.0f} GB — "
+            f"using CogVideoX 5B I2V ({COGVIDEO.size_gb:.0f} GB) instead."
+        )
+        log.info(msg)
+        if progress_cb:
+            progress_cb(msg)
+        return COGVIDEO_MODEL_ID
+
+    return WAN_MODEL_ID
+
+
+def _load_pipeline(model_id: str = "", hf_token: str = "", progress_cb: Callable[[str], None] | None = None):
     """Load the video generation pipeline."""
     global _pipeline, _pipeline_type
 
     if _pipeline is not None:
         return
 
+    model_id = _resolve_model_id(model_id, progress_cb)
 
     device, dtype = _get_device_and_dtype()
-
-    if not model_id:
-        model_id = WAN_MODEL_ID
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -132,7 +182,7 @@ def generate_video(
         if progress_cb:
             progress_cb("Loading video model (this may take a few minutes on first run)...")
 
-        _load_pipeline(model_id, hf_token)
+        _load_pipeline(model_id, hf_token, progress_cb)
 
         if progress_cb:
             progress_cb("Preparing source image...")
