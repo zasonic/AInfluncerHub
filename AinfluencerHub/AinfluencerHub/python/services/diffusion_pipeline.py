@@ -7,6 +7,13 @@ Replaces ComfyUI for all image generation:
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+VAE fix (2026-05):
+  SDXL's bundled VAE has a known fp16 precision bug that causes cyan/purple
+  color oversaturation in generated images. _load_base_pipeline() now loads
+  madebyollin/sdxl-vae-fp16-fix (0.16 GB) and injects it before constructing
+  the pipeline. Falls back to the default VAE on any failure so generation
+  is never blocked.
 """
 
 import logging
@@ -15,7 +22,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import IP_ADAPTER, SDXL_BASE, SDXL_VAE_FP16_FIX
 
 log = logging.getLogger("hub.diffusion")
 
@@ -35,12 +42,12 @@ def _get_device_and_dtype():
 
 
 def _load_base_pipeline(hf_token: str = ""):
-    """Load the SDXL base pipeline."""
+    """Load the SDXL base pipeline with the fp16-fixed VAE when available."""
     global _pipeline
     if _pipeline is not None:
         return
 
-    from diffusers import StableDiffusionXLPipeline
+    from diffusers import AutoencoderKL, StableDiffusionXLPipeline
 
     device, dtype = _get_device_and_dtype()
     log.info("Loading SDXL pipeline on %s ...", device)
@@ -48,6 +55,24 @@ def _load_base_pipeline(hf_token: str = ""):
     kwargs: dict = {"torch_dtype": dtype, "variant": "fp16", "use_safetensors": True}
     if hf_token:
         kwargs["token"] = hf_token
+
+    # Inject the fp16-fixed VAE to prevent color oversaturation on CUDA.
+    # The SDXL bundled VAE has a precision bug in fp16 mode that produces
+    # systematic cyan/purple shifts; madebyollin/sdxl-vae-fp16-fix corrects
+    # this. Required=False so a download failure never blocks generation.
+    if device == "cuda":
+        try:
+            vae = AutoencoderKL.from_pretrained(
+                SDXL_VAE_FP16_FIX.repo_id,
+                torch_dtype=dtype,
+                token=hf_token or None,
+            )
+            kwargs["vae"] = vae
+            log.info("Using fp16-fixed VAE (%s).", SDXL_VAE_FP16_FIX.repo_id)
+        except Exception as exc:
+            log.info(
+                "fp16-fixed VAE unavailable (%s) — using bundled default VAE.", exc
+            )
 
     _pipeline = StableDiffusionXLPipeline.from_pretrained(
         SDXL_BASE.repo_id, revision=SDXL_BASE.revision, **kwargs

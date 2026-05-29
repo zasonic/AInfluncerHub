@@ -31,6 +31,13 @@ SDXL_BASE = ModelSpec(
     required=True,
 )
 
+SDXL_VAE_FP16_FIX = ModelSpec(
+    repo_id="madebyollin/sdxl-vae-fp16-fix",
+    purpose="Fixed SDXL VAE — prevents fp16 color oversaturation in generated images",
+    size_gb=0.16,
+    required=False,
+)
+
 IP_ADAPTER = ModelSpec(
     repo_id="h94/IP-Adapter",
     purpose="Face-consistent dataset generation (Step 2)",
@@ -73,6 +80,7 @@ COGVIDEO = ModelSpec(
 
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
+    "sdxl_vae_fix":     SDXL_VAE_FP16_FIX,
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
