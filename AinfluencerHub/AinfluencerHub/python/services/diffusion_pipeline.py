@@ -24,6 +24,15 @@ _pipeline = None
 _ip_adapter_loaded = False
 _face_app = None
 
+# Portrait-tuned negative prompt that suppresses common SDXL artefacts.
+# Applied to both dataset generation and Studio generation so every image
+# benefits without the user needing to type it manually.
+_PORTRAIT_NEG = (
+    "blurry, low quality, watermark, text, deformed, ugly, bad anatomy, "
+    "extra limbs, disfigured, malformed, fused fingers, bad proportions, "
+    "long neck, mutation"
+)
+
 
 def _get_device_and_dtype():
     """Return the best available device and dtype."""
@@ -54,12 +63,21 @@ def _load_base_pipeline(hf_token: str = ""):
     )
     _pipeline.to(device)
 
-    # Enable memory optimizations
+    # Enable memory optimisations in priority order.
+    # xformers is fastest; attention slicing is the universal fallback that
+    # reduces peak VRAM by processing attention heads one slice at a time.
     if device == "cuda":
         try:
             _pipeline.enable_xformers_memory_efficient_attention()
+            log.info("SDXL: xformers memory-efficient attention enabled.")
         except Exception:
-            pass  # xformers optional
+            # xformers not installed — attention slicing prevents OOM on GPUs
+            # under 12 GB at the cost of a small speed penalty (~10–15%).
+            _pipeline.enable_attention_slicing(1)
+            log.info(
+                "SDXL: xformers unavailable — attention slicing active "
+                "(lower peak VRAM, slightly slower)."
+            )
 
     log.info("SDXL pipeline loaded.")
 
@@ -147,7 +165,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
@@ -189,7 +207,7 @@ def generate_dataset(
             try:
                 result = _pipeline(
                     prompt=full_prompt,
-                    negative_prompt="blurry, low quality, watermark, text, deformed",
+                    negative_prompt=_PORTRAIT_NEG,
                     ip_adapter_image=face_image,
                     num_inference_steps=20,
                     guidance_scale=4.0,
@@ -217,7 +235,7 @@ def generate_dataset(
 
 def generate_image(
     positive_prompt: str,
-    negative_prompt: str = "blurry, low quality, watermark, text",
+    negative_prompt: str = _PORTRAIT_NEG,
     lora_path: str = "",
     lora_strength: float = 0.85,
     width: int = 832,
