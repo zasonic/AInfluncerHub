@@ -24,6 +24,15 @@ _pipeline = None
 _ip_adapter_loaded = False
 _face_app = None
 
+# Negative prompt used for face-consistent dataset generation.
+# Specific face-artifact suppressors reduce deformed outputs without
+# narrowing scene diversity.
+_FACE_NEGATIVE_PROMPT = (
+    "blurry, low quality, watermark, text, deformed, extra faces, double face, "
+    "deformed eyes, asymmetric eyes, cross-eyed, missing limbs, extra limbs, "
+    "disfigured, mutation, ugly, duplicate, cloned face"
+)
+
 
 def _get_device_and_dtype():
     """Return the best available device and dtype."""
@@ -60,6 +69,17 @@ def _load_base_pipeline(hf_token: str = ""):
             _pipeline.enable_xformers_memory_efficient_attention()
         except Exception:
             pass  # xformers optional
+
+    # FreeU (Si et al., NeurIPS 2023): rescales U-Net backbone features and
+    # enhances skip connections via spectral filtering for sharper detail and
+    # richer texture at no extra cost. SDXL-tuned params from the paper/GitHub.
+    # Compatible with IP-Adapter and LoRA — all three can be active together.
+    # Silently skipped if the installed diffusers build pre-dates support (0.22).
+    try:
+        _pipeline.enable_freeu(s1=0.6, s2=0.4, b1=1.1, b2=1.2)
+        log.info("FreeU enabled (s1=0.6, s2=0.4, b1=1.1, b2=1.2).")
+    except Exception:
+        pass
 
     log.info("SDXL pipeline loaded.")
 
@@ -189,7 +209,7 @@ def generate_dataset(
             try:
                 result = _pipeline(
                     prompt=full_prompt,
-                    negative_prompt="blurry, low quality, watermark, text, deformed",
+                    negative_prompt=_FACE_NEGATIVE_PROMPT,
                     ip_adapter_image=face_image,
                     num_inference_steps=20,
                     guidance_scale=4.0,

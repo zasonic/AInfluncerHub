@@ -18,6 +18,12 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+  Augmentation — RandomHorizontalFlip removed for face datasets: faces carry
+            identity-specific asymmetry (moles, lighting, expression) and
+            flipping synthesises a second conflicting identity, degrading face
+            consistency (DreamBooth / Ruiz et al. 2023). Replaced with small
+            RandomAffine (±3°, scale 0.97–1.03) and subtle ColorJitter for
+            mild invariance that does not harm identity.
 """
 
 import logging
@@ -193,7 +199,17 @@ def run_training(
             self.transform = transforms.Compose([
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
-                transforms.RandomHorizontalFlip(),
+                # No horizontal flip: faces carry identity-specific asymmetry
+                # (moles, lighting, expression asymmetry). Flipping synthesises a
+                # second conflicting identity and degrades face consistency
+                # (DreamBooth / Ruiz et al. 2023, community best practice).
+                # Small affine jitter + subtle brightness/contrast variance instead.
+                transforms.RandomAffine(
+                    degrees=3,
+                    scale=(0.97, 1.03),
+                    interpolation=transforms.InterpolationMode.BILINEAR,
+                ),
+                transforms.ColorJitter(brightness=0.05, contrast=0.05),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ])
