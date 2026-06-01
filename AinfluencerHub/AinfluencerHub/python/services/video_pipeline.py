@@ -137,9 +137,16 @@ def generate_video(
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
+        # Load and resize source image, preserving portrait orientation
         source = Image.open(image_path).convert("RGB")
-        source = source.resize((832, 480), Image.LANCZOS)
+        w, h = source.size
+        if h > w:
+            # Portrait photo (typical for influencer reference) — use 480×832
+            target_size = (480, 832)
+        else:
+            # Landscape or square — use standard 832×480
+            target_size = (832, 480)
+        source = source.resize(target_size, Image.LANCZOS)
 
         if seed < 0:
             seed = random.randint(0, 2**32 - 1)

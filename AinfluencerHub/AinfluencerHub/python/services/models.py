@@ -33,11 +33,19 @@ SDXL_BASE = ModelSpec(
 
 IP_ADAPTER = ModelSpec(
     repo_id="h94/IP-Adapter",
-    purpose="Face-consistent dataset generation (Step 2)",
+    purpose="Face-consistent dataset generation — CLIP-based fallback (Step 2)",
     size_gb=1.8,
     required=True,
     subfolder="sdxl_models",
     weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors",
+)
+
+IP_ADAPTER_FACEID = ModelSpec(
+    repo_id="h94/IP-Adapter-FaceID",
+    purpose="Face-identity dataset generation — ArcFace+CLIP, stronger identity preservation (Step 2)",
+    size_gb=0.5,
+    required=False,
+    weight_name="ip-adapter-faceid-plusv2_sdxl.bin",
 )
 
 FLORENCE_CAPTIONER = ModelSpec(
@@ -74,6 +82,7 @@ COGVIDEO = ModelSpec(
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
     "ip_adapter":       IP_ADAPTER,
+    "ip_adapter_faceid": IP_ADAPTER_FACEID,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
     "wan_video":        WAN_VIDEO,
