@@ -118,6 +118,12 @@ def _load_faceid_adapter(hf_token: str = "") -> bool:
     *who* a person is, not just what they look like — so face identity is
     preserved across varied poses and lighting more reliably than CLIP alone.
 
+    The Plus V2 model ships as two files in h94/IP-Adapter-FaceID:
+      - ip-adapter-faceid-plusv2_sdxl.bin        (the IP-Adapter weights)
+      - ip-adapter-faceid-plusv2_sdxl_lora.safetensors  (companion UNet LoRA)
+    Both must be loaded; the companion LoRA shapes the UNet to accept the
+    ArcFace conditioning signal.
+
     Returns True if FaceID loaded successfully, False if not (caller must
     then call _load_ip_adapter() for the CLIP-only fallback).
     """
@@ -137,15 +143,29 @@ def _load_faceid_adapter(hf_token: str = "") -> bool:
             token=hf_token or None,
         )
         _pipeline.set_ip_adapter_scale(0.5)
+
+        # Companion UNet LoRA — required for FaceID Plus V2 to condition correctly
+        _pipeline.load_lora_weights(
+            IP_ADAPTER_FACEID.repo_id,
+            weight_name="ip-adapter-faceid-plusv2_sdxl_lora.safetensors",
+            token=hf_token or None,
+        )
+        _pipeline.fuse_lora(lora_scale=1.0)
+
         _ip_adapter_loaded = True
         _faceid_mode = True
-        log.info("IP-Adapter FaceID Plus V2 loaded.")
+        log.info("IP-Adapter FaceID Plus V2 loaded (with companion LoRA).")
         return True
     except Exception as exc:
         log.warning(
             "FaceID Plus V2 not available (%s) — falling back to IP-Adapter Plus Face.",
             exc,
         )
+        # Companion LoRA may have partially loaded — ensure clean state
+        try:
+            _pipeline.unload_lora_weights()
+        except Exception:
+            pass
         return False
 
 
@@ -219,6 +239,13 @@ def unload() -> None:
     global _pipeline, _ip_adapter_loaded, _faceid_mode, _face_app
 
     if _pipeline is not None:
+        if _faceid_mode:
+            # Unfuse the companion LoRA before destroying the pipeline so
+            # state is clean if the pipeline is recreated in the same process.
+            try:
+                _pipeline.unfuse_lora()
+            except Exception:
+                pass
         del _pipeline
         _pipeline = None
         _ip_adapter_loaded = False

@@ -194,10 +194,6 @@ def run_training(
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
                 transforms.RandomHorizontalFlip(),
-                # Mild rotation — keeps faces recognisable across slight head tilts
-                transforms.RandomRotation(degrees=3, interpolation=transforms.InterpolationMode.BILINEAR),
-                # Subtle brightness/contrast jitter for lighting variation
-                transforms.ColorJitter(brightness=0.05, contrast=0.05),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ])
