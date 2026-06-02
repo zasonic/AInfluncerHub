@@ -2,7 +2,16 @@
 services/video_pipeline.py — Native video generation using HuggingFace diffusers.
 
 Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
-Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
+Supports image-to-video generation using Wan 2.2 TI2V-5B (preferred),
+Wan 2.1 T2V-14B (fallback), or CogVideoX.
+
+Model selection at runtime (when model_id is not supplied by the caller):
+  1. Wan 2.2 TI2V-5B  — 5 B params, 8 GB VRAM, 720p.
+                         Auto-selected only when already in the local HF cache
+                         so no unexpected multi-GB download is triggered.
+  2. Wan 2.1 T2V-14B  — 14 B params, 28 GB VRAM.
+                         Used when Wan 2.2 is not cached locally.
+  3. CogVideoX-5b-I2V — selected when model_id explicitly contains "CogVideo".
 
 All operations run locally on the user's GPU without external services.
 """
@@ -12,11 +21,12 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import COGVIDEO, WAN_VIDEO
+from services.models import COGVIDEO, WAN_VIDEO, WAN_VIDEO_22
 
 log = logging.getLogger("hub.video")
 
-WAN_MODEL_ID = WAN_VIDEO.repo_id
+WAN_MODEL_ID     = WAN_VIDEO.repo_id      # Wan 2.1 — fallback
+WAN_MODEL_ID_V22 = WAN_VIDEO_22.repo_id   # Wan 2.2 TI2V-5B — preferred
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
 
 # Lazy global
@@ -27,24 +37,39 @@ _pipeline_type = None
 def _get_device_and_dtype():
     """Return the best available device and dtype."""
     import torch
-
     if torch.cuda.is_available():
         return "cuda", torch.bfloat16
     return "cpu", torch.float32
 
 
-def _load_pipeline(model_id: str = "", hf_token: str = ""):
+def _best_wan_model_id() -> str:
+    """
+    Return Wan 2.2 TI2V-5B if it is already present in the local HF cache;
+    otherwise return Wan 2.1.  Uses huggingface_hub.try_to_load_from_cache
+    which returns None when the model is absent — no network request is made,
+    so this probe never triggers an unintended download.
+    """
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        probe = try_to_load_from_cache(WAN_MODEL_ID_V22, "model_index.json")
+        if probe is not None:
+            return WAN_MODEL_ID_V22
+    except Exception:
+        pass
+    return WAN_MODEL_ID
+
+
+def _load_pipeline(model_id: str = "", hf_token: str = "") -> None:
     """Load the video generation pipeline."""
     global _pipeline, _pipeline_type
 
     if _pipeline is not None:
         return
 
-
     device, dtype = _get_device_and_dtype()
 
     if not model_id:
-        model_id = WAN_MODEL_ID
+        model_id = _best_wan_model_id()
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -54,27 +79,19 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
 
     if "CogVideo" in model_id:
         from diffusers import CogVideoXImageToVideoPipeline
-
-        _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(
-            model_id, **kwargs
-        )
+        _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(model_id, **kwargs)
         _pipeline_type = "cogvideo"
     else:
-        # Wan2.1 pipeline
         from diffusers import AutoPipelineForVideoGeneration
+        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(model_id, **kwargs)
+        _pipeline_type = "wan22" if model_id == WAN_MODEL_ID_V22 else "wan"
 
-        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
-            model_id, **kwargs
-        )
-        _pipeline_type = "wan"
-
-    # Enable CPU offloading for large models
     if device == "cuda":
         _pipeline.enable_model_cpu_offload()
     else:
         _pipeline.to(device)
 
-    log.info("Video pipeline loaded: %s", _pipeline_type)
+    log.info("Video pipeline loaded: %s (%s)", _pipeline_type, model_id)
 
 
 def unload() -> None:
@@ -112,7 +129,7 @@ def generate_video(
         image_path:   Source image to animate.
         prompt:       Motion/scene description.
         output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
+        model_id:     HuggingFace model ID. Empty = auto-select best cached Wan model.
         hf_token:     HuggingFace token for model download.
         num_frames:   Number of video frames to generate.
         steps:        Diffusion inference steps.
@@ -129,15 +146,19 @@ def generate_video(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        resolved_id = model_id or _best_wan_model_id()
+        model_label = (
+            "Wan 2.2 TI2V-5B" if resolved_id == WAN_MODEL_ID_V22
+            else resolved_id.split("/")[-1]
+        )
         if progress_cb:
-            progress_cb("Loading video model (this may take a few minutes on first run)...")
+            progress_cb(f"Loading {model_label} (this may take a few minutes on first run)...")
 
-        _load_pipeline(model_id, hf_token)
+        _load_pipeline(resolved_id, hf_token)
 
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
         source = Image.open(image_path).convert("RGB")
         source = source.resize((832, 480), Image.LANCZOS)
 
@@ -158,7 +179,6 @@ def generate_video(
             generator=generator,
         )
 
-        # Export frames to video
         if progress_cb:
             progress_cb("Saving video...")
 

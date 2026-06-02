@@ -4,6 +4,18 @@ services/models.py — Central registry for every HuggingFace model the app uses
 All pipelines must import their model specs from this module instead of
 hard-coding repo IDs. This gives a single place to pin/bump model revisions,
 roll back safely, and drive download progress in the UI.
+
+v2.1 model updates:
+  Florence-2 -> Florence-2-large-PromptGen-v2.0
+    MiaoshouAI's fine-tune adds the MIXED_CAPTION task, which produces
+    richer, training-optimised captions with combined tag + natural-language
+    output. ~4 GB on disk; same API as vanilla Florence-2. Falls back to
+    microsoft/Florence-2-large at runtime if the new model cannot be loaded.
+
+  Wan 2.2 TI2V-5B added as optional upgrade for Step 5 animation.
+    5B parameter model (vs 14B Wan 2.1), works on >=8 GB VRAM, 720p output.
+    Auto-selected at runtime when already cached; otherwise Wan 2.1 is used
+    so existing users are not forced to download a new model.
 """
 
 from dataclasses import dataclass
@@ -40,11 +52,21 @@ IP_ADAPTER = ModelSpec(
     weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors",
 )
 
+# Primary captioner: Florence-2-large-PromptGen-v2.0
+# Adds MIXED_CAPTION task — better training captions than vanilla Florence-2.
 FLORENCE_CAPTIONER = ModelSpec(
-    repo_id="microsoft/Florence-2-large",
-    purpose="Fast image captioning (Step 3)",
+    repo_id="MiaoshouAI/Florence-2-large-PromptGen-v2.0",
+    purpose="Training-optimised captioning with MIXED_CAPTION task (Step 3)",
     size_gb=4.0,
     required=True,
+)
+
+# Runtime fallback: used when PromptGen-v2.0 cannot be loaded.
+FLORENCE_CAPTIONER_FALLBACK = ModelSpec(
+    repo_id="microsoft/Florence-2-large",
+    purpose="Florence-2 base captioner (Step 3 fallback)",
+    size_gb=4.0,
+    required=False,
 )
 
 JOY_CAPTIONER = ModelSpec(
@@ -54,9 +76,18 @@ JOY_CAPTIONER = ModelSpec(
     required=False,
 )
 
+# Wan 2.2 TI2V-5B — preferred video model; 5B params, >=8 GB VRAM, 720p
+WAN_VIDEO_22 = ModelSpec(
+    repo_id="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    purpose="Wan 2.2 image-to-video — 8 GB VRAM, 720p output (Step 5, preferred)",
+    size_gb=10.0,
+    required=False,
+)
+
+# Wan 2.1 — retained as fallback for users who already have it cached
 WAN_VIDEO = ModelSpec(
     repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
+    purpose="Wan 2.1 image-to-video animation — 28 GB VRAM (Step 5, fallback)",
     size_gb=28.0,
     required=False,
 )
@@ -72,12 +103,14 @@ COGVIDEO = ModelSpec(
 # ── Public API ───────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
-    "sdxl_base":        SDXL_BASE,
-    "ip_adapter":       IP_ADAPTER,
-    "florence":         FLORENCE_CAPTIONER,
-    "joycaption":       JOY_CAPTIONER,
-    "wan_video":        WAN_VIDEO,
-    "cogvideo":         COGVIDEO,
+    "sdxl_base":             SDXL_BASE,
+    "ip_adapter":            IP_ADAPTER,
+    "florence":              FLORENCE_CAPTIONER,
+    "florence_fallback":     FLORENCE_CAPTIONER_FALLBACK,
+    "joycaption":            JOY_CAPTIONER,
+    "wan_video_22":          WAN_VIDEO_22,
+    "wan_video":             WAN_VIDEO,
+    "cogvideo":              COGVIDEO,
 }
 
 
