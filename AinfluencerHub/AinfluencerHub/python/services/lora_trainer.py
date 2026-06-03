@@ -18,6 +18,15 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements:
+  ColorJitter — Mild per-image brightness/contrast/saturation jitter added
+            to the dataset augmentation pipeline. Exposes the model to
+            lighting variation within a small face dataset without distorting
+            face identity. Parameters (0.05/0.05/0.02) are intentionally
+            conservative; no hue jitter (face identity is hue-sensitive).
+            Consistent with few-shot fine-tuning practice in DreamBooth §4
+            and HuggingFace diffusers training examples.
 """
 
 import logging
@@ -194,6 +203,10 @@ def run_training(
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
                 transforms.RandomHorizontalFlip(),
+                # Mild lighting variation: helps generalise across the small
+                # face dataset without shifting skin tone or hair colour.
+                # No hue jitter — face identity is hue-sensitive.
+                transforms.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.02),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ])
