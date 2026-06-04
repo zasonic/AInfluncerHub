@@ -22,7 +22,7 @@ class ModelSpec:
     weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
+# ── Specs ────────────────────────────────────────────
 
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
@@ -68,16 +68,32 @@ COGVIDEO = ModelSpec(
     required=False,
 )
 
+COGVIDEO_2B = ModelSpec(
+    repo_id="THUDM/CogVideoX-2b-I2V",
+    purpose="Lightweight fallback video model — works on 8 GB VRAM cards (Step 5)",
+    size_gb=4.0,
+    required=False,
+)
 
-# ── Public API ───────────────────────────────────────────────────────────────
+FLORENCE_CAPTIONER_BASE = ModelSpec(
+    repo_id="microsoft/Florence-2-base",
+    purpose="Fast captioning on low-RAM machines — fallback if Florence-2-large fails to load (Step 3)",
+    size_gb=0.9,
+    required=False,
+)
+
+
+# ── Public API ────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
-    "sdxl_base":        SDXL_BASE,
-    "ip_adapter":       IP_ADAPTER,
-    "florence":         FLORENCE_CAPTIONER,
-    "joycaption":       JOY_CAPTIONER,
-    "wan_video":        WAN_VIDEO,
-    "cogvideo":         COGVIDEO,
+    "sdxl_base":            SDXL_BASE,
+    "ip_adapter":           IP_ADAPTER,
+    "florence":             FLORENCE_CAPTIONER,
+    "florence_base":        FLORENCE_CAPTIONER_BASE,
+    "joycaption":           JOY_CAPTIONER,
+    "wan_video":            WAN_VIDEO,
+    "cogvideo":             COGVIDEO,
+    "cogvideo_2b":          COGVIDEO_2B,
 }
 
 

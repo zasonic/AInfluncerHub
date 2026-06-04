@@ -1,9 +1,9 @@
 """
-services/florence_captioner.py — Local Florence2-large captioning.
+services/florence_captioner.py — Local Florence2 captioning with size fallback.
 
-Florence2-large is a ~4 GB model that runs on GPU.  It is loaded once
-and kept in memory for the duration of a captioning session, then
-unloaded to free VRAM for training.
+Tries Florence-2-large (~4 GB) first; if loading fails due to OOM or a missing
+download it automatically retries with Florence-2-base (~0.9 GB) so users on
+machines with limited VRAM still get captions instead of a hard failure.
 
 Caption output is formatted for the target architecture.  For Z-Image
 Turbo / Flux models this is rich natural-language with trigger word.
@@ -13,7 +13,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import FLORENCE_CAPTIONER
+from services.models import FLORENCE_CAPTIONER, FLORENCE_CAPTIONER_BASE
 
 log = logging.getLogger("hub.captioner")
 
@@ -32,24 +32,40 @@ def _load_model(hf_token: str | None = None) -> None:
     from transformers import AutoModelForCausalLM, AutoProcessor
 
     _device = "cuda" if torch.cuda.is_available() else "cpu"
-    log.info("Loading Florence2-large on %s ...", _device)
+    dtype = torch.float16 if _device == "cuda" else torch.float32
 
-    kwargs: dict = {
-        "trust_remote_code": True,
-        "torch_dtype":       torch.float16 if _device == "cuda" else torch.float32,
-    }
-    if hf_token:
-        kwargs["token"] = hf_token
+    for spec in (FLORENCE_CAPTIONER, FLORENCE_CAPTIONER_BASE):
+        log.info("Loading %s on %s ...", spec.repo_id, _device)
+        kwargs: dict = {"trust_remote_code": True, "torch_dtype": dtype}
+        if hf_token:
+            kwargs["token"] = hf_token
+        try:
+            _model = AutoModelForCausalLM.from_pretrained(
+                spec.repo_id, **kwargs
+            ).to(_device)
+            _processor = AutoProcessor.from_pretrained(
+                spec.repo_id,
+                trust_remote_code=True,
+                token=hf_token or None,
+            )
+            log.info("%s loaded.", spec.repo_id)
+            return
+        except Exception as exc:
+            log.warning(
+                "%s failed to load (%s) — trying next fallback", spec.repo_id, exc
+            )
+            _model = None
+            _processor = None
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
 
-    _model = AutoModelForCausalLM.from_pretrained(
-        FLORENCE_CAPTIONER.repo_id, **kwargs
-    ).to(_device)
-    _processor = AutoProcessor.from_pretrained(
-        FLORENCE_CAPTIONER.repo_id,
-        trust_remote_code=True,
-        token=hf_token or None,
+    raise RuntimeError(
+        "Florence-2 could not be loaded (both large and base variants failed). "
+        "Check your HuggingFace token and available disk/RAM."
     )
-    log.info("Florence2 loaded.")
 
 
 def unload_model() -> None:

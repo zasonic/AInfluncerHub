@@ -147,7 +147,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────
 
 
 def generate_dataset(
@@ -191,8 +191,8 @@ def generate_dataset(
                     prompt=full_prompt,
                     negative_prompt="blurry, low quality, watermark, text, deformed",
                     ip_adapter_image=face_image,
-                    num_inference_steps=20,
-                    guidance_scale=4.0,
+                    num_inference_steps=25,
+                    guidance_scale=4.5,
                     width=832,
                     height=1216,
                     generator=generator,

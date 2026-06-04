@@ -5,6 +5,16 @@ Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
 Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
 
 All operations run locally on the user's GPU without external services.
+
+VRAM-aware model selection (automatic cascade):
+  Wan2.1-14B  — 24+ GB VRAM  (best quality)
+  CogVideoX-5b — 12+ GB VRAM  (good quality, faster download)
+  CogVideoX-2b —  8+ GB VRAM  (acceptable quality, works on budget GPUs)
+  CPU          — no GPU       (very slow but functional)
+
+If a caller passes an explicit model_id that beats the VRAM check we honour
+it; if loading fails we step down the cascade automatically so the app never
+leaves non-technical users staring at an out-of-memory error.
 """
 
 import logging
@@ -12,12 +22,20 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import COGVIDEO, WAN_VIDEO
+from services.models import COGVIDEO, COGVIDEO_2B, WAN_VIDEO
 
 log = logging.getLogger("hub.video")
 
-WAN_MODEL_ID = WAN_VIDEO.repo_id
+WAN_MODEL_ID      = WAN_VIDEO.repo_id
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
+COGVIDEO_2B_ID    = COGVIDEO_2B.repo_id
+
+# VRAM thresholds (GiB) required to safely load each model with CPU offloading.
+_VRAM_REQUIRED: dict[str, float] = {
+    WAN_MODEL_ID:      24.0,
+    COGVIDEO_MODEL_ID: 12.0,
+    COGVIDEO_2B_ID:     8.0,
+}
 
 # Lazy global
 _pipeline = None
@@ -33,48 +51,104 @@ def _get_device_and_dtype():
     return "cpu", torch.float32
 
 
+def _free_vram_gib() -> float:
+    """Return free GPU memory in GiB, or 0.0 if no CUDA device is present."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return 0.0
+        free, _ = torch.cuda.mem_get_info()
+        return free / (1024 ** 3)
+    except Exception:
+        return 0.0
+
+
+def _pick_model() -> str:
+    """
+    Choose the heaviest model that fits available VRAM.
+
+    Falls back down the cascade (Wan → CogVideoX-5b → CogVideoX-2b) so
+    non-technical users with budget GPUs still get a result instead of an
+    out-of-memory crash.
+    """
+    free = _free_vram_gib()
+    if free >= _VRAM_REQUIRED[WAN_MODEL_ID]:
+        return WAN_MODEL_ID
+    if free >= _VRAM_REQUIRED[COGVIDEO_MODEL_ID]:
+        log.info(
+            "VRAM %.1f GiB < %.0f GiB required for Wan2.1 — using CogVideoX-5b",
+            free, _VRAM_REQUIRED[WAN_MODEL_ID],
+        )
+        return COGVIDEO_MODEL_ID
+    # 2b works at 8 GiB; below that we still try and let CPU offloading handle it
+    log.info(
+        "VRAM %.1f GiB < %.0f GiB required for CogVideoX-5b — using CogVideoX-2b",
+        free, _VRAM_REQUIRED[COGVIDEO_MODEL_ID],
+    )
+    return COGVIDEO_2B_ID
+
+
 def _load_pipeline(model_id: str = "", hf_token: str = ""):
-    """Load the video generation pipeline."""
+    """Load the video generation pipeline, stepping down the cascade on OOM."""
     global _pipeline, _pipeline_type
 
     if _pipeline is not None:
         return
 
-
     device, dtype = _get_device_and_dtype()
 
-    if not model_id:
-        model_id = WAN_MODEL_ID
+    # Auto-select if the caller didn't pin a model
+    resolved_id = model_id or _pick_model()
 
-    log.info("Loading video pipeline: %s on %s ...", model_id, device)
+    # Cascade: try the resolved model, then step down on failure
+    cascade = [resolved_id]
+    if resolved_id == WAN_MODEL_ID:
+        cascade += [COGVIDEO_MODEL_ID, COGVIDEO_2B_ID]
+    elif resolved_id == COGVIDEO_MODEL_ID:
+        cascade += [COGVIDEO_2B_ID]
 
-    kwargs: dict = {"torch_dtype": dtype}
-    if hf_token:
-        kwargs["token"] = hf_token
+    last_exc: Exception | None = None
+    for candidate in cascade:
+        log.info("Loading video pipeline: %s on %s ...", candidate, device)
+        kwargs: dict = {"torch_dtype": dtype}
+        if hf_token:
+            kwargs["token"] = hf_token
+        try:
+            if "CogVideo" in candidate:
+                from diffusers import CogVideoXImageToVideoPipeline
+                _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(
+                    candidate, **kwargs
+                )
+                _pipeline_type = "cogvideo"
+            else:
+                from diffusers import AutoPipelineForVideoGeneration
+                _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
+                    candidate, **kwargs
+                )
+                _pipeline_type = "wan"
 
-    if "CogVideo" in model_id:
-        from diffusers import CogVideoXImageToVideoPipeline
+            if device == "cuda":
+                _pipeline.enable_model_cpu_offload()
+            else:
+                _pipeline.to(device)
 
-        _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(
-            model_id, **kwargs
-        )
-        _pipeline_type = "cogvideo"
-    else:
-        # Wan2.1 pipeline
-        from diffusers import AutoPipelineForVideoGeneration
+            log.info("Video pipeline loaded: %s (%s)", _pipeline_type, candidate)
+            return
+        except Exception as exc:
+            log.warning("Failed to load %s: %s — trying next fallback", candidate, exc)
+            last_exc = exc
+            _pipeline = None
+            _pipeline_type = None
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
 
-        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
-            model_id, **kwargs
-        )
-        _pipeline_type = "wan"
-
-    # Enable CPU offloading for large models
-    if device == "cuda":
-        _pipeline.enable_model_cpu_offload()
-    else:
-        _pipeline.to(device)
-
-    log.info("Video pipeline loaded: %s", _pipeline_type)
+    raise RuntimeError(
+        f"All video model candidates failed. Last error: {last_exc}"
+    )
 
 
 def unload() -> None:
@@ -112,7 +186,8 @@ def generate_video(
         image_path:   Source image to animate.
         prompt:       Motion/scene description.
         output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
+        model_id:     HuggingFace model ID. Leave empty for automatic VRAM-aware
+                      selection (Wan2.1 → CogVideoX-5b → CogVideoX-2b cascade).
         hf_token:     HuggingFace token for model download.
         num_frames:   Number of video frames to generate.
         steps:        Diffusion inference steps.
@@ -129,15 +204,30 @@ def generate_video(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        free_gib = _free_vram_gib()
         if progress_cb:
-            progress_cb("Loading video model (this may take a few minutes on first run)...")
+            vram_info = f" ({free_gib:.0f} GB free VRAM)" if free_gib > 0 else " (CPU mode)"
+            progress_cb(
+                f"Loading video model{vram_info} — this may take a few minutes on first run..."
+            )
 
         _load_pipeline(model_id, hf_token)
+
+        # Report which model was actually loaded so users understand what happened
+        if progress_cb and _pipeline_type:
+            model_names = {
+                "wan":      "Wan2.1-14B (best quality)",
+                "cogvideo": (
+                    "CogVideoX-5b"
+                    if _pipeline is not None and COGVIDEO_MODEL_ID in str(getattr(_pipeline, "config", {}).get("_name_or_path", ""))
+                    else "CogVideoX-2b (budget GPU mode)"
+                ),
+            }
+            progress_cb(f"Model ready: {model_names.get(_pipeline_type, _pipeline_type)}")
 
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
         source = Image.open(image_path).convert("RGB")
         source = source.resize((832, 480), Image.LANCZOS)
 
@@ -158,7 +248,6 @@ def generate_video(
             generator=generator,
         )
 
-        # Export frames to video
         if progress_cb:
             progress_cb("Saving video...")
 
