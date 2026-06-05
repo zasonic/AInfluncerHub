@@ -72,16 +72,17 @@ def _load_ip_adapter(hf_token: str = ""):
 
     _load_base_pipeline(hf_token)
 
-    log.info("Loading IP-Adapter face model...")
+    log.info("Loading IP-Adapter FaceID Plus V2 model...")
     _pipeline.load_ip_adapter(
         IP_ADAPTER.repo_id,
         subfolder=IP_ADAPTER.subfolder,
         weight_name=IP_ADAPTER.weight_name,
+        image_encoder_folder="models/image_encoder",
         token=hf_token or None,
     )
-    _pipeline.set_ip_adapter_scale(0.7)
+    _pipeline.set_ip_adapter_scale(0.8)
     _ip_adapter_loaded = True
-    log.info("IP-Adapter loaded.")
+    log.info("IP-Adapter FaceID Plus V2 loaded.")
 
 
 def _get_face_app():
@@ -171,7 +172,8 @@ def generate_dataset(
 
     try:
         _load_ip_adapter(hf_token)
-        face_image = _prepare_face_image(reference_image)
+        # FaceID Plus V2 uses ArcFace embeddings, not a raw PIL image
+        face_embedding = _extract_face_embedding(reference_image)
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
@@ -190,7 +192,7 @@ def generate_dataset(
                 result = _pipeline(
                     prompt=full_prompt,
                     negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image=face_image,
+                    ip_adapter_image_embeds=[face_embedding],
                     num_inference_steps=20,
                     guidance_scale=4.0,
                     width=832,

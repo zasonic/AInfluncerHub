@@ -132,7 +132,7 @@ export const scoreDataset = (slug: string) =>
 export const startCaptioning = (
   slug: string,
   hf_token: string,
-  captioner: "florence2" | "joycaption" = "florence2"
+  captioner: "florence2" | "joycaption" | "qwen" = "florence2"
 ): EventSource =>
   new EventSource(
     `${_baseUrl}/api/captions/${slug}/run?hf_token=${encodeURIComponent(hf_token)}&captioner=${captioner}`
@@ -157,12 +157,19 @@ export const startTraining = (
   hf_token:      string,
   steps:         number,
   rank:          number,
-  learning_rate: string
+  learning_rate: string,
+  base_model:    string = "sdxl"
 ): EventSource =>
   new EventSource(
     `${_baseUrl}/api/training/${slug}/start?` +
     `hf_token=${encodeURIComponent(hf_token)}&` +
-    `steps=${steps}&rank=${rank}&lr=${encodeURIComponent(learning_rate)}`
+    `steps=${steps}&rank=${rank}&lr=${encodeURIComponent(learning_rate)}&` +
+    `base_model=${encodeURIComponent(base_model)}`
+  );
+
+export const scoreDatasetIdentity = (slug: string) =>
+  request<{ scores: Array<{ path: string; filename: string; similarity: number; passed: boolean }>; passed: number; total: number }>(
+    "POST", `/api/dataset/${slug}/score-identity`
   );
 
 export const cancelTraining = (slug: string) =>
