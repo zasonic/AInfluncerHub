@@ -33,6 +33,38 @@ def _get_device_and_dtype():
     return "cpu", torch.float32
 
 
+def _available_vram_gb() -> float:
+    """Return free VRAM in GB, or 0 on CPU / if unavailable."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free, _ = torch.cuda.mem_get_info(0)
+            return free / (1024 ** 3)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _pick_video_model(requested: str) -> str:
+    """Select the best video model given available VRAM.
+
+    Wan2.1 (14B) needs ~12 GB free with CPU offloading.
+    CogVideoX-5b needs ~10 GB free with CPU offloading.
+    Falls back to CogVideoX when VRAM is tight and no explicit choice was made.
+    """
+    if requested:
+        return requested
+    vram = _available_vram_gb()
+    if vram > 0 and vram < 10.0:
+        log.info(
+            "Only %.1f GB VRAM free — selecting CogVideoX-5b (needs ~10 GB) "
+            "instead of Wan2.1 (needs ~12 GB). Close other GPU apps if this fails.",
+            vram,
+        )
+        return COGVIDEO_MODEL_ID
+    return WAN_MODEL_ID
+
+
 def _load_pipeline(model_id: str = "", hf_token: str = ""):
     """Load the video generation pipeline."""
     global _pipeline, _pipeline_type
@@ -40,11 +72,10 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
     if _pipeline is not None:
         return
 
-
     device, dtype = _get_device_and_dtype()
 
     if not model_id:
-        model_id = WAN_MODEL_ID
+        model_id = _pick_video_model("")
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -171,6 +202,17 @@ def generate_video(
             progress_cb("Video created successfully.")
 
         return out_path
+
+    except torch.cuda.OutOfMemoryError:
+        msg = (
+            "Not enough GPU memory for video generation. "
+            "Close other GPU applications and try again, or reduce the number of frames. "
+            f"Available: {_available_vram_gb():.1f} GB — video needs ~10–12 GB."
+        )
+        log.error("Video OOM: %s", msg)
+        if progress_cb:
+            progress_cb(f"Error: {msg}")
+        return None
 
     except Exception as exc:
         log.error("Video generation failed: %s", exc)

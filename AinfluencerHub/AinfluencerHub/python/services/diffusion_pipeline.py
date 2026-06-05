@@ -202,6 +202,16 @@ def generate_dataset(
                 image.save(out_path, quality=95)
                 paths.append(out_path)
 
+            except torch.cuda.OutOfMemoryError:
+                log.error("OOM on prompt %d — stopping dataset generation early.", i)
+                if progress_cb:
+                    progress_cb(
+                        i, total,
+                        "Not enough GPU memory — stopping early. "
+                        "Try closing other GPU apps or reducing image resolution."
+                    )
+                break
+
             except Exception as exc:
                 log.error("Generation failed for prompt %d: %s", i, exc)
                 continue
@@ -284,6 +294,17 @@ def generate_image(
             progress_cb(f"Generated {len(paths)} image(s).")
 
         return paths
+
+    except torch.cuda.OutOfMemoryError:
+        msg = (
+            "Not enough GPU memory to generate this image. "
+            "Try reducing the resolution, closing other GPU applications, "
+            "or disabling LoRA. SDXL needs at least 8 GB of VRAM."
+        )
+        log.error("Image generation OOM: %s", msg)
+        if progress_cb:
+            progress_cb(f"Error: {msg}")
+        return []
 
     finally:
         # Unload LoRA weights to avoid contaminating next generation

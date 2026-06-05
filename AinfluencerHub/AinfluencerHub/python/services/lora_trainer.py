@@ -85,6 +85,27 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
+    # ── VRAM preflight warning ────────────────────────────────────────────────────────
+    # SDXL UNet + LoRA training (with gradient checkpointing + 8-bit Adam) peaks
+    # at ~10–14 GB. Warn early so the user isn't surprised by an OOM after waiting
+    # several minutes for model weights to load.
+    if device == "cuda":
+        try:
+            total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            if total_vram_gb < 8.0:
+                _emit(
+                    f"⚠ Warning: Only {total_vram_gb:.1f} GB VRAM detected. "
+                    "LoRA training typically needs 10–14 GB. "
+                    "Training may run out of memory — try reducing steps or rank."
+                )
+            elif total_vram_gb < 12.0:
+                _emit(
+                    f"ℹ {total_vram_gb:.1f} GB VRAM detected. "
+                    "Training will use gradient checkpointing and 8-bit Adam to fit in memory."
+                )
+        except Exception:
+            pass
+
     # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
 
     _emit("Collecting dataset...")
@@ -316,10 +337,21 @@ def run_training(
         }
 
         # Forward pass
-        model_pred = unet(
-            noisy_latents, timesteps, prompt_embeds,
-            added_cond_kwargs=added_cond_kwargs,
-        ).sample
+        try:
+            model_pred = unet(
+                noisy_latents, timesteps, prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+            ).sample
+        except torch.cuda.OutOfMemoryError:
+            _emit(
+                f"Out of GPU memory at step {global_step}. "
+                "Try reducing LoRA rank, closing other GPU apps, or using fewer steps."
+            )
+            _cleanup(unet, vae, text_encoder_1, text_encoder_2)
+            return False, (
+                "Training stopped: not enough GPU memory. "
+                "Reduce LoRA rank (try 8 instead of 16) or close other GPU applications."
+            )
 
         # MinSNR-gamma weighted loss (Hang et al. 2023, gamma=5.0).
         # SNR(t) = alpha_t^2 / sigma_t^2 = alphas_cumprod[t] / (1 - alphas_cumprod[t]).
