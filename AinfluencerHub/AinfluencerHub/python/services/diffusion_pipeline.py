@@ -15,13 +15,14 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import IP_ADAPTER, IP_ADAPTER_FACE_ID, SDXL_BASE
 
 log = logging.getLogger("hub.diffusion")
 
 # Lazy globals — loaded on demand, freed after use
 _pipeline = None
 _ip_adapter_loaded = False
+_ip_adapter_mode: str = "none"   # "faceid_plusv2" | "plus_face" | "none"
 _face_app = None
 
 
@@ -54,34 +55,69 @@ def _load_base_pipeline(hf_token: str = ""):
     )
     _pipeline.to(device)
 
-    # Enable memory optimizations
+    # Enable memory optimizations — xformers preferred, attention slicing as
+    # fallback so 8 GB VRAM GPUs can still run generation without xformers.
     if device == "cuda":
+        xformers_ok = False
         try:
             _pipeline.enable_xformers_memory_efficient_attention()
+            xformers_ok = True
+            log.info("xformers memory-efficient attention enabled.")
         except Exception:
-            pass  # xformers optional
+            pass
+        if not xformers_ok:
+            try:
+                _pipeline.enable_attention_slicing(slice_size="auto")
+                log.info("Attention slicing enabled (xformers not available).")
+            except Exception:
+                pass  # neither available — run at full memory
 
     log.info("SDXL pipeline loaded.")
 
 
 def _load_ip_adapter(hf_token: str = ""):
-    """Load IP-Adapter for face-consistent generation."""
-    global _ip_adapter_loaded
+    """
+    Load IP-Adapter for face-consistent generation.
+
+    Tries IP-Adapter-FaceID-PlusV2 first (combines InsightFace identity
+    embeddings with CLIP structure — stronger identity preservation).
+    Falls back to IP-Adapter-Plus-Face (CLIP-only) if FaceID fails to load,
+    so generation always works even on first run before FaceID is cached.
+    """
+    global _ip_adapter_loaded, _ip_adapter_mode
     if _ip_adapter_loaded:
         return
 
     _load_base_pipeline(hf_token)
 
-    log.info("Loading IP-Adapter face model...")
-    _pipeline.load_ip_adapter(
-        IP_ADAPTER.repo_id,
-        subfolder=IP_ADAPTER.subfolder,
-        weight_name=IP_ADAPTER.weight_name,
-        token=hf_token or None,
-    )
-    _pipeline.set_ip_adapter_scale(0.7)
+    # Try FaceID-PlusV2 first (better identity preservation)
+    try:
+        log.info("Loading IP-Adapter-FaceID-PlusV2...")
+        _pipeline.load_ip_adapter(
+            IP_ADAPTER_FACE_ID.repo_id,
+            subfolder=None,
+            weight_name=IP_ADAPTER_FACE_ID.weight_name,
+            image_encoder_folder=None,
+            token=hf_token or None,
+        )
+        _pipeline.set_ip_adapter_scale(0.8)
+        _ip_adapter_mode = "faceid_plusv2"
+        log.info("IP-Adapter-FaceID-PlusV2 loaded (InsightFace + CLIP identity).")
+    except Exception as exc:
+        log.warning(
+            "IP-Adapter-FaceID-PlusV2 failed (%s) — falling back to IP-Adapter-Plus-Face.", exc
+        )
+        _pipeline.load_ip_adapter(
+            IP_ADAPTER.repo_id,
+            subfolder=IP_ADAPTER.subfolder,
+            weight_name=IP_ADAPTER.weight_name,
+            token=hf_token or None,
+        )
+        _pipeline.set_ip_adapter_scale(0.7)
+        _ip_adapter_mode = "plus_face"
+        log.info("IP-Adapter-Plus-Face loaded (CLIP-only fallback).")
+
     _ip_adapter_loaded = True
-    log.info("IP-Adapter loaded.")
 
 
 def _get_face_app():
@@ -129,12 +165,13 @@ def _prepare_face_image(image_path: Path):
 
 def unload() -> None:
     """Release all GPU memory."""
-    global _pipeline, _ip_adapter_loaded, _face_app
+    global _pipeline, _ip_adapter_loaded, _ip_adapter_mode, _face_app
 
     if _pipeline is not None:
         del _pipeline
         _pipeline = None
         _ip_adapter_loaded = False
+        _ip_adapter_mode = "none"
 
     if _face_app is not None:
         del _face_app
@@ -173,6 +210,21 @@ def generate_dataset(
         _load_ip_adapter(hf_token)
         face_image = _prepare_face_image(reference_image)
 
+        # FaceID-PlusV2: also extract InsightFace embedding for identity conditioning.
+        # If extraction fails (e.g. no clear face), fall back to image-only mode.
+        import torch
+        faceid_embeds = None
+        if _ip_adapter_mode == "faceid_plusv2":
+            try:
+                raw_embed = _extract_face_embedding(reference_image)  # numpy (512,)
+                faceid_embeds = torch.from_numpy(raw_embed).unsqueeze(0).to(
+                    dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+                )  # [1, 512]
+                log.info("FaceID embedding extracted for identity conditioning.")
+            except Exception as exc:
+                log.warning("Face embedding extraction failed (%s) — using image-only mode.", exc)
+                faceid_embeds = None
+
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
                 break
@@ -183,20 +235,24 @@ def generate_dataset(
                 progress_cb(i, total, f"Generating {i + 1}/{total}: {label}")
 
             seed = random.randint(0, 2**32 - 1)
-            import torch
             generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
 
+            call_kwargs: dict = {
+                "prompt":              full_prompt,
+                "negative_prompt":     "blurry, low quality, watermark, text, deformed",
+                "ip_adapter_image":    face_image,
+                "num_inference_steps": 20,
+                "guidance_scale":      4.0,
+                "width":               832,
+                "height":              1216,
+                "generator":           generator,
+            }
+            if faceid_embeds is not None:
+                # FaceID-PlusV2 expects [tensor([1, 1, 512])] — one list item per adapter
+                call_kwargs["ip_adapter_image_embeds"] = [faceid_embeds.unsqueeze(0)]
+
             try:
-                result = _pipeline(
-                    prompt=full_prompt,
-                    negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image=face_image,
-                    num_inference_steps=20,
-                    guidance_scale=4.0,
-                    width=832,
-                    height=1216,
-                    generator=generator,
-                )
+                result = _pipeline(**call_kwargs)
                 image = result.images[0]
                 out_path = output_dir / f"dataset_{len(paths) + 1:03d}.jpg"
                 image.save(out_path, quality=95)

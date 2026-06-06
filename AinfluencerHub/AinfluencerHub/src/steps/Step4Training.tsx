@@ -256,11 +256,11 @@ export function Step4Training({ onAdvance }: Props) {
             </button>
           ) : (
             <button
-              className="btn btn-ghost"
+              className="btn btn-primary"
               onClick={startTraining}
-              disabled={running}
+              disabled={running || done}
             >
-              Start training
+              {done ? "Training complete" : "Start training"}
             </button>
           )}
           <button

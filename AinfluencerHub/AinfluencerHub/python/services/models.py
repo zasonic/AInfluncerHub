@@ -33,11 +33,19 @@ SDXL_BASE = ModelSpec(
 
 IP_ADAPTER = ModelSpec(
     repo_id="h94/IP-Adapter",
-    purpose="Face-consistent dataset generation (Step 2)",
+    purpose="Face-consistent dataset generation (Step 2) — CLIP-based fallback",
     size_gb=1.8,
     required=True,
     subfolder="sdxl_models",
     weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors",
+)
+
+IP_ADAPTER_FACE_ID = ModelSpec(
+    repo_id="h94/IP-Adapter-FaceID",
+    purpose="Face-consistent dataset generation (Step 2) — preferred; uses InsightFace identity embeddings + CLIP for stronger identity preservation",
+    size_gb=1.8,
+    required=True,
+    weight_name="ip-adapter-faceid-plusv2_sdxl.bin",
 )
 
 FLORENCE_CAPTIONER = ModelSpec(
@@ -56,7 +64,14 @@ JOY_CAPTIONER = ModelSpec(
 
 WAN_VIDEO = ModelSpec(
     repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
+    purpose="Text-to-video model (legacy; Step 5 now prefers WAN_VIDEO_I2V)",
+    size_gb=28.0,
+    required=False,
+)
+
+WAN_VIDEO_I2V = ModelSpec(
+    repo_id="Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
+    purpose="Image-to-video animation — animates a still image (Step 5)",
     size_gb=28.0,
     required=False,
 )
@@ -72,12 +87,14 @@ COGVIDEO = ModelSpec(
 # ── Public API ───────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
-    "sdxl_base":        SDXL_BASE,
-    "ip_adapter":       IP_ADAPTER,
-    "florence":         FLORENCE_CAPTIONER,
-    "joycaption":       JOY_CAPTIONER,
-    "wan_video":        WAN_VIDEO,
-    "cogvideo":         COGVIDEO,
+    "sdxl_base":          SDXL_BASE,
+    "ip_adapter":         IP_ADAPTER,
+    "ip_adapter_face_id": IP_ADAPTER_FACE_ID,
+    "florence":           FLORENCE_CAPTIONER,
+    "joycaption":         JOY_CAPTIONER,
+    "wan_video":          WAN_VIDEO,
+    "wan_video_i2v":      WAN_VIDEO_I2V,
+    "cogvideo":           COGVIDEO,
 }
 
 

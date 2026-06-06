@@ -222,8 +222,14 @@ def run_training(
             }
 
     dataset = CaptionImageDataset(pairs, tokenizer_1, tokenizer_2)
+    # num_workers > 0 requires fork-safe spawn on Windows; 2 on posix gives
+    # one prefetch worker which overlaps data loading with GPU compute.
+    # pin_memory is only beneficial when copying to CUDA.
+    _num_workers = 0 if os.name == "nt" else min(2, os.cpu_count() or 1)
     dataloader = DataLoader(
-        dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
+        dataset, batch_size=1, shuffle=True,
+        num_workers=_num_workers, pin_memory=(device == "cuda"),
+        persistent_workers=(_num_workers > 0),
     )
 
     # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
