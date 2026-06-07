@@ -2,9 +2,16 @@
 services/video_pipeline.py — Native video generation using HuggingFace diffusers.
 
 Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
-Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
+Supports image-to-video generation using Wan2.1-I2V or CogVideoX as a fallback.
 
 All operations run locally on the user's GPU without external services.
+
+Pipeline class note: image-to-video Wan checkpoints load through
+WanImageToVideoPipeline (added in diffusers 0.33.0). The plain WanPipeline is
+text-to-video only — it has no `image=` input — and AutoPipelineForVideoGeneration
+does not exist anywhere in diffusers, so loading it always raised ImportError.
+Older diffusers installs that predate WanImageToVideoPipeline fall back to
+CogVideoX, which has shipped an image-to-video pipeline since diffusers 0.30.0.
 """
 
 import logging
@@ -60,13 +67,28 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
         )
         _pipeline_type = "cogvideo"
     else:
-        # Wan2.1 pipeline
-        from diffusers import AutoPipelineForVideoGeneration
+        # Wan image-to-video checkpoints require WanImageToVideoPipeline —
+        # the dedicated I2V pipeline that accepts an `image=` conditioning
+        # input. (diffusers >= 0.33.0; older installs fall back to CogVideoX,
+        # which has supported image-to-video since diffusers 0.30.0.)
+        try:
+            from diffusers import WanImageToVideoPipeline
 
-        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
-            model_id, **kwargs
-        )
-        _pipeline_type = "wan"
+            _pipeline = WanImageToVideoPipeline.from_pretrained(
+                model_id, **kwargs
+            )
+            _pipeline_type = "wan"
+        except ImportError:
+            log.warning(
+                "WanImageToVideoPipeline unavailable (requires diffusers>=0.33.0); "
+                "falling back to CogVideoX for image-to-video generation."
+            )
+            from diffusers import CogVideoXImageToVideoPipeline
+
+            _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(
+                COGVIDEO_MODEL_ID, **kwargs
+            )
+            _pipeline_type = "cogvideo"
 
     # Enable CPU offloading for large models
     if device == "cuda":
