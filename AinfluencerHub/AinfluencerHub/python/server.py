@@ -1,5 +1,4 @@
-"""
-python/server.py — AinfluencerHub FastAPI backend.
+"""python/server.py — AinfluencerHub FastAPI backend.
 
 Launched by Tauri (Rust) before the WebView opens.
 All long-running operations stream progress via Server-Sent Events.
@@ -43,7 +42,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("hub.server")
 
-# ── Global singletons ─────────────────────────────────────────────────────────
+# ── Global singletons ─────────────────────────────────────────────────────
 
 settings = Settings()
 
@@ -54,7 +53,7 @@ _gpu_lock = threading.Lock()
 _cancel_lock = threading.Lock()
 _cancel_events: dict[str, threading.Event] = {}
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
+# ── FastAPI app ─────────────────────────────────────────────────────────────
 
 app = FastAPI(title="AinfluencerHub", version="2.0.0")
 app.add_middleware(
@@ -64,7 +63,7 @@ app.add_middleware(
     allow_headers  = ["*"],
 )
 
-# ── SSE helpers ───────────────────────────────────────────────────────────────
+# ── SSE helpers ────────────────────────────────────────────────────────────
 
 def _sse_event(data: dict) -> dict:
     return {"data": json.dumps(data)}
@@ -99,7 +98,7 @@ def _drain_queue(q: SSEQueue) -> AsyncGenerator[dict, None]:
     """Legacy-compatible alias so existing callers keep working."""
     return q.drain()
 
-# ── Health ────────────────────────────────────────────────────────────────────
+# ── Health ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
@@ -186,10 +185,18 @@ async def upload_dataset(slug: str, files: list[UploadFile] = File(...)):
 
 @app.get("/api/dataset/{slug}/generate")
 async def generate_dataset_images(
-    slug:  str,
-    count: int = Query(25),
+    slug:      str,
+    count:     int = Query(25),
+    num_steps: int = Query(20, ge=4, le=50,
+                           description="Inference steps per image (8=fast, 20=default quality)"),
 ):
-    """Generate face-consistent dataset images using native diffusers pipeline."""
+    """
+    Generate face-consistent dataset images using native diffusers pipeline.
+
+    num_steps controls the speed/quality tradeoff: 8 is ~60% faster than 20
+    at the cost of slightly softer detail. Face identity is preserved at both
+    settings because IP-Adapter guides every step regardless of step count.
+    """
     proj = _load_project(slug)
     refs = proj.reference_images()
     if not refs:
@@ -222,6 +229,7 @@ async def generate_dataset_images(
                     {"type": "progress", "done": done, "total": total, "message": msg}
                 ),
                 cancel_event=cancel,
+                num_steps=num_steps,
             )
             proj.set("dataset_count", len(proj.dataset_images()))
             proj.save()
@@ -414,7 +422,7 @@ def cancel_training(slug: str):
         ev.set()
     return {"ok": True}
 
-# ── Model management ─────────────────────────────────────────────────────────
+# ── Model management ───────────────────────────────────────────────────────────
 
 @app.get("/api/models/status")
 def get_model_status():
@@ -447,15 +455,25 @@ async def download_model(model_hf_id: str = Query("")):
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
 
-# ── Studio — image generation ─────────────────────────────────────────────────
+# ── Studio — image generation ───────────────────────────────────────────────────
 
 @app.get("/api/studio/{slug}/generate")
 async def generate_image(
     slug:          str,
     prompt:        str   = Query(""),
     lora_strength: float = Query(0.85),
+    use_turbo:     bool  = Query(False,
+                                 description="Use SDXL-Turbo for 5× faster generation (4 steps). "
+                                             "Requires stabilityai/sdxl-turbo (~6.9 GB). "
+                                             "Falls back to SDXL base if not downloaded."),
 ):
-    """Generate an image using native diffusers pipeline with optional LoRA."""
+    """
+    Generate an image using native diffusers pipeline with optional LoRA.
+
+    use_turbo=true activates SDXL-Turbo: same LoRA weights, ~5× fewer steps,
+    noticeably faster. Best for quick previews. Use false (default) for
+    final-quality exports.
+    """
     proj = _load_project(slug)
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
@@ -477,6 +495,7 @@ async def generate_image(
                 progress_cb=lambda msg: q.put(
                     {"type": "progress", "done": 0, "total": 1, "message": msg}
                 ),
+                use_turbo=use_turbo,
             )
             q.put({"type": "done", "message": "Image generated.", "payload": {"paths": [str(p) for p in paths]}})
         except Exception as exc:
@@ -508,7 +527,7 @@ def get_generated_images(slug: str):
         ]
     }
 
-# ── Studio — video ────────────────────────────────────────────────────────────
+# ── Studio — video ────────────────────────────────────────────────────────────────
 
 @app.get("/api/studio/{slug}/animate")
 async def animate_image(
@@ -562,7 +581,7 @@ def get_videos(slug: str):
         "videos": [{"path": str(v), "filename": v.name} for v in vids]
     }
 
-# ── Settings ──────────────────────────────────────────────────────────────────
+# ── Settings ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/settings")
 def get_settings():
@@ -574,7 +593,7 @@ def update_settings(body: dict):
     settings.update(body)
     return {"ok": True}
 
-# ── File serving ──────────────────────────────────────────────────────────────
+# ── File serving ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/files/image")
 def serve_image(path: str = Query(...)):
@@ -586,7 +605,7 @@ def serve_image(path: str = Query(...)):
         raise HTTPException(404, "Image not found.")
     return FileResponse(p)
 
-# ── Internal helper ───────────────────────────────────────────────────────────
+# ── Internal helper ─────────────────────────────────────────────────────────────────
 
 def _load_project(slug: str) -> Project:
     output_dir = settings.resolve_output_dir()
@@ -596,7 +615,7 @@ def _load_project(slug: str) -> Project:
     except FileNotFoundError as exc:
         raise HTTPException(404, f"Project '{slug}' not found.") from exc
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

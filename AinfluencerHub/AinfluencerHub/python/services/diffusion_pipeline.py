@@ -7,6 +7,16 @@ Replaces ComfyUI for all image generation:
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
+
+v2.1 additions:
+  num_steps in generate_dataset() — expose inference step count so callers
+    can choose 8 steps (fast, 60% less time) or 20 steps (default).
+    IP-Adapter face consistency is retained at both settings.
+  use_turbo in generate_image() — loads SDXL-Turbo (stabilityai/sdxl-turbo)
+    for the Studio generation step. 4 steps vs 20; 5× faster. SDXL-Turbo
+    omits classifier-free guidance (guidance_scale=0.0), so negative prompts
+    are ignored in turbo mode. Falls back to SDXL base automatically on any
+    load failure.
 """
 
 import logging
@@ -15,12 +25,13 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import IP_ADAPTER, SDXL_BASE, SDXL_TURBO
 
 log = logging.getLogger("hub.diffusion")
 
 # Lazy globals — loaded on demand, freed after use
 _pipeline = None
+_pipeline_type: str | None = None   # "base" | "turbo"
 _ip_adapter_loaded = False
 _face_app = None
 
@@ -36,9 +47,11 @@ def _get_device_and_dtype():
 
 def _load_base_pipeline(hf_token: str = ""):
     """Load the SDXL base pipeline."""
-    global _pipeline
-    if _pipeline is not None:
+    global _pipeline, _pipeline_type
+    if _pipeline is not None and _pipeline_type == "base":
         return
+    if _pipeline is not None:
+        unload()
 
     from diffusers import StableDiffusionXLPipeline
 
@@ -61,7 +74,58 @@ def _load_base_pipeline(hf_token: str = ""):
         except Exception:
             pass  # xformers optional
 
+    _pipeline_type = "base"
     log.info("SDXL pipeline loaded.")
+
+
+def _load_turbo_pipeline(hf_token: str = "") -> bool:
+    """
+    Load SDXL-Turbo for fast inference (4 steps, guidance_scale=0.0).
+
+    Returns True on success, False if the model is not yet downloaded —
+    in which case the caller should fall back to the SDXL base pipeline.
+    Silently falls back to SDXL base if SDXL-Turbo cannot be loaded, so
+    this function never crashes the generation flow.
+    """
+    global _pipeline, _pipeline_type
+    if _pipeline is not None and _pipeline_type == "turbo":
+        return True
+    if _pipeline is not None:
+        unload()
+
+    try:
+        from diffusers import AutoPipelineForText2Image
+
+        device, dtype = _get_device_and_dtype()
+        log.info("Loading SDXL-Turbo pipeline on %s ...", device)
+
+        kwargs: dict = {"torch_dtype": dtype}
+        if hf_token:
+            kwargs["token"] = hf_token
+
+        _pipeline = AutoPipelineForText2Image.from_pretrained(
+            SDXL_TURBO.repo_id, **kwargs
+        )
+        _pipeline.to(device)
+
+        if device == "cuda":
+            try:
+                _pipeline.enable_xformers_memory_efficient_attention()
+            except Exception:
+                pass
+
+        _pipeline_type = "turbo"
+        log.info("SDXL-Turbo pipeline loaded.")
+        return True
+
+    except Exception as exc:
+        log.warning(
+            "SDXL-Turbo failed to load (%s) — falling back to SDXL base. "
+            "Download stabilityai/sdxl-turbo (~6.9 GB) to enable turbo mode.",
+            exc,
+        )
+        _load_base_pipeline(hf_token)
+        return False
 
 
 def _load_ip_adapter(hf_token: str = ""):
@@ -129,11 +193,12 @@ def _prepare_face_image(image_path: Path):
 
 def unload() -> None:
     """Release all GPU memory."""
-    global _pipeline, _ip_adapter_loaded, _face_app
+    global _pipeline, _pipeline_type, _ip_adapter_loaded, _face_app
 
     if _pipeline is not None:
         del _pipeline
         _pipeline = None
+        _pipeline_type = None
         _ip_adapter_loaded = False
 
     if _face_app is not None:
@@ -147,7 +212,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
@@ -158,12 +223,16 @@ def generate_dataset(
     hf_token: str = "",
     progress_cb: Callable[[int, int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    num_steps: int = 20,
 ) -> list[Path]:
     """
     Generate face-consistent dataset images using IP-Adapter.
 
     Uses the reference image's face to guide generation, producing varied
     poses and settings while maintaining face identity.
+
+    num_steps: inference steps per image. 20 = default quality. 8 = fast
+    mode (~60% faster, slightly softer detail but face identity intact).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
@@ -191,7 +260,7 @@ def generate_dataset(
                     prompt=full_prompt,
                     negative_prompt="blurry, low quality, watermark, text, deformed",
                     ip_adapter_image=face_image,
-                    num_inference_steps=20,
+                    num_inference_steps=num_steps,
                     guidance_scale=4.0,
                     width=832,
                     height=1216,
@@ -228,10 +297,16 @@ def generate_image(
     output_dir: Path | None = None,
     hf_token: str = "",
     progress_cb: Callable[[str], None] | None = None,
+    use_turbo: bool = False,
 ) -> list[Path]:
     """
     Generate an image using SDXL with optional LoRA.
     Returns list of output file paths.
+
+    use_turbo: if True, loads SDXL-Turbo (4 steps, ~5× faster). Turbo
+    ignores guidance_scale and negative_prompt because it runs without
+    classifier-free guidance. Falls back to SDXL base if turbo is not
+    downloaded yet. LoRA weights are compatible with both pipelines.
     """
     import torch
 
@@ -240,12 +315,31 @@ def generate_image(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _load_base_pipeline(hf_token)
+        if use_turbo:
+            turbo_ok = _load_turbo_pipeline(hf_token)
+            # If turbo failed to load, _load_turbo_pipeline already loaded base.
+            # Adjust params accordingly.
+            if turbo_ok:
+                actual_steps = 4
+                actual_cfg = 0.0
+                actual_neg = ""      # turbo ignores negative prompts
+                if progress_cb:
+                    progress_cb("Loading SDXL-Turbo pipeline (fast mode)...")
+            else:
+                actual_steps = steps
+                actual_cfg = cfg
+                actual_neg = negative_prompt
+                if progress_cb:
+                    progress_cb("Turbo not available — using SDXL base...")
+        else:
+            _load_base_pipeline(hf_token)
+            actual_steps = steps
+            actual_cfg = cfg
+            actual_neg = negative_prompt
+            if progress_cb:
+                progress_cb("Loading pipeline...")
 
-        if progress_cb:
-            progress_cb("Loading pipeline...")
-
-        # Load LoRA if provided
+        # Load LoRA if provided (compatible with both SDXL base and turbo)
         if lora_path and Path(lora_path).exists():
             if progress_cb:
                 progress_cb("Loading LoRA weights...")
@@ -266,9 +360,9 @@ def generate_image(
 
         result = _pipeline(
             prompt=positive_prompt,
-            negative_prompt=negative_prompt,
-            num_inference_steps=steps,
-            guidance_scale=cfg,
+            negative_prompt=actual_neg,
+            num_inference_steps=actual_steps,
+            guidance_scale=actual_cfg,
             width=width,
             height=height,
             generator=generator,

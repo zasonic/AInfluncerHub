@@ -22,12 +22,29 @@ _device = None
 
 JOYCAPTION_MODEL_ID = JOY_CAPTIONER.repo_id
 
-# System prompt for training-style captions
+# System prompt for training-style captions.
+# Research guidance applied (based on diffusion training caption best practices):
+#  - Concrete, literal visual language over abstract/evaluative adjectives
+#    ("cobalt blue linen shirt" not "nice top")
+#  - Precise color names over generic ones ("copper-toned" not "tan")
+#  - Background described as a distinct element — teaches the model to
+#    decouple subject from scene, which is critical for LoRA generalization
+#  - Avoid photographic quality descriptors (sharp, blurry, focus) — these
+#    map to CLIP tokens unrelated to the subject's actual appearance
+#  - Avoid evaluative language (beautiful, stunning) — wastes token budget
+#    and introduces subjective noise into training signals
 CAPTION_PROMPT = (
-    "Write a detailed description of this image for use as a training caption "
-    "for an AI image generation model. Describe the person's appearance, pose, "
-    "expression, clothing, and the setting. Be specific and use natural language. "
-    "Do not start with 'The image shows' or 'This is'. Just describe what you see."
+    "Write a detailed, concrete image description for AI image generation training. "
+    "Follow these rules strictly: "
+    "1) Describe specific colors precisely (e.g. 'cobalt blue', 'copper-toned skin', "
+    "'off-white linen' — never just 'dark', 'light', or 'tan'). "
+    "2) Describe the person's facial features, expression, exact hair color and style, "
+    "clothing with fabric and color, and pose or body position. "
+    "3) Describe the background and setting as a separate element from the subject. "
+    "4) Do NOT use evaluative or subjective words (beautiful, stunning, gorgeous, amazing). "
+    "5) Do NOT use photographic terms (sharp, in focus, blurry, high resolution). "
+    "6) Do NOT start with 'The image shows', 'This is', 'This image', or 'In this photo'. "
+    "Just describe what you see in direct, literal, visual terms."
 )
 
 

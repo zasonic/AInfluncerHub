@@ -47,17 +47,17 @@ async function request<T>(
   return res.json() as Promise<T>;
 }
 
-// ── Health ─────────────────────────────────────────────────────────────────
+// ── Health ───────────────────────────────────────────────────────────────────────
 
 export const health = () =>
   request<{ ok: boolean }>("GET", "/health");
 
-// ── Preflight ──────────────────────────────────────────────────────────────
+// ── Preflight ───────────────────────────────────────────────────────────────────
 
 export const getPreflight = () =>
   request<PreflightResult>("GET", "/api/preflight");
 
-// ── Projects ───────────────────────────────────────────────────────────────
+// ── Projects ───────────────────────────────────────────────────────────────────
 
 export const listProjects = () =>
   request<Project[]>("GET", "/api/projects");
@@ -88,14 +88,15 @@ export const uploadReferences = async (
   return res.json();
 };
 
-// ── Dataset ────────────────────────────────────────────────────────────────
+// ── Dataset ───────────────────────────────────────────────────────────────────────
 
 export const startDatasetGen = (
-  slug:  string,
-  count: number,
+  slug:      string,
+  count:     number,
+  num_steps: number = 20,
 ): EventSource =>
   new EventSource(
-    `${_baseUrl}/api/dataset/${slug}/generate?count=${count}`
+    `${_baseUrl}/api/dataset/${slug}/generate?count=${count}&num_steps=${num_steps}`
   );
 
 export const uploadDatasetImages = async (
@@ -150,7 +151,7 @@ export const updateCaption = (
 export const injectTrigger = (slug: string) =>
   request<{ updated: number }>("POST", `/api/captions/${slug}/inject-trigger`);
 
-// ── Training ───────────────────────────────────────────────────────────────
+// ── Training ───────────────────────────────────────────────────────────────────
 
 export const startTraining = (
   slug:          string,
@@ -168,7 +169,7 @@ export const startTraining = (
 export const cancelTraining = (slug: string) =>
   request<void>("POST", `/api/training/${slug}/cancel`);
 
-// ── Model management ──────────────────────────────────────────────────────
+// ── Model management ──────────────────────────────────────────────────────────
 
 export const getModelStatus = () =>
   request<ModelStatusMap>("GET", "/api/models/status");
@@ -178,17 +179,19 @@ export const downloadModel = (modelHfId: string): EventSource =>
     `${_baseUrl}/api/models/download?model_hf_id=${encodeURIComponent(modelHfId)}`
   );
 
-// ── Studio ─────────────────────────────────────────────────────────────────
+// ── Studio ───────────────────────────────────────────────────────────────────────
 
 export const generateImage = (
   slug:           string,
   prompt:         string,
   lora_strength:  number,
+  use_turbo:      boolean = false,
 ): EventSource =>
   new EventSource(
     `${_baseUrl}/api/studio/${slug}/generate?` +
     `prompt=${encodeURIComponent(prompt)}&` +
-    `lora_strength=${lora_strength}`
+    `lora_strength=${lora_strength}&` +
+    `use_turbo=${use_turbo}`
   );
 
 export const animateImage = (
@@ -208,7 +211,7 @@ export const getGeneratedImages = (slug: string) =>
 export const getVideos = (slug: string) =>
   request<{ videos: GeneratedVideo[] }>("GET", `/api/studio/${slug}/videos`);
 
-// ── Settings ───────────────────────────────────────────────────────────────
+// ── Settings ───────────────────────────────────────────────────────────────────
 
 export const getSettings = () =>
   request<AppSettings>("GET", "/api/settings");
@@ -216,7 +219,7 @@ export const getSettings = () =>
 export const updateSettings = (data: Partial<AppSettings>) =>
   request<void>("PUT", "/api/settings", data);
 
-// ── Image URL helper ───────────────────────────────────────────────────────
+// ── Image URL helper ──────────────────────────────────────────────────────────────────
 
 export const imageUrl = (path: string) =>
   `${_baseUrl}/api/files/image?path=${encodeURIComponent(path)}`;

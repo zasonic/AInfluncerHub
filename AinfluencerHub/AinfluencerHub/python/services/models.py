@@ -22,7 +22,7 @@ class ModelSpec:
     weight_name: str | None = None   # specific weight file (e.g. IP-Adapter)
 
 
-# ── Specs ────────────────────────────────────────────────────────────────────
+# ── Specs ────────────────────────────────────────────────────────────────────────
 
 SDXL_BASE = ModelSpec(
     repo_id="stabilityai/stable-diffusion-xl-base-1.0",
@@ -68,11 +68,19 @@ COGVIDEO = ModelSpec(
     required=False,
 )
 
+SDXL_TURBO = ModelSpec(
+    repo_id="stabilityai/sdxl-turbo",
+    purpose="Fast text-to-image generation for Studio (Step 5); 4 steps vs SDXL base 20",
+    size_gb=6.9,
+    required=False,
+)
 
-# ── Public API ───────────────────────────────────────────────────────────────
+
+# ── Public API ─────────────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
+    "sdxl_turbo":       SDXL_TURBO,
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
