@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import IP_ADAPTER, SDXL_BASE, SDXL_VAE_FP16_FIX
 
 log = logging.getLogger("hub.diffusion")
 
@@ -54,12 +54,33 @@ def _load_base_pipeline(hf_token: str = ""):
     )
     _pipeline.to(device)
 
-    # Enable memory optimizations
+    # Replace the bundled SDXL VAE with the numerically stable fp16 version.
+    # The standard SDXL VAE has precision issues in fp16 that cause blurry,
+    # oversaturated output. The fix VAE (~160 MB) resolves this without any
+    # quality trade-off. GPU only — CPU inference keeps the bundled VAE since
+    # it already runs in float32 and doesn't exhibit the fp16 artefacts.
+    if device == "cuda":
+        try:
+            from diffusers import AutoencoderKL
+            fixed_vae = AutoencoderKL.from_pretrained(
+                SDXL_VAE_FP16_FIX.repo_id,
+                torch_dtype=dtype,
+                token=hf_token or None,
+            ).to(device)
+            _pipeline.vae = fixed_vae
+            log.info("SDXL fp16-fix VAE loaded.")
+        except Exception as exc:
+            log.warning("fp16-fix VAE unavailable — using bundled VAE: %s", exc)
+
+    # Slice VAE decode into tiles to cut peak VRAM without any quality loss.
+    _pipeline.enable_vae_slicing()
+
+    # xformers memory-efficient attention (optional, best-effort).
     if device == "cuda":
         try:
             _pipeline.enable_xformers_memory_efficient_attention()
         except Exception:
-            pass  # xformers optional
+            pass
 
     log.info("SDXL pipeline loaded.")
 
@@ -147,7 +168,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(

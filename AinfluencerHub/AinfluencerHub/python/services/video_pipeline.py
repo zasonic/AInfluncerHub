@@ -2,7 +2,10 @@
 services/video_pipeline.py — Native video generation using HuggingFace diffusers.
 
 Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
-Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
+Supports image-to-video generation with the following preference order:
+  1. Wan2.1-I2V  (WanImageToVideoPipeline or AutoPipelineForVideoGeneration)
+  2. Wan2.1-T2V  (AutoPipelineForVideoGeneration, for users with the T2V model)
+  3. CogVideoX-5b-I2V  (last-resort fallback)
 
 All operations run locally on the user's GPU without external services.
 """
@@ -12,11 +15,12 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import COGVIDEO, WAN_VIDEO
+from services.models import COGVIDEO, WAN_I2V, WAN_VIDEO
 
 log = logging.getLogger("hub.video")
 
-WAN_MODEL_ID = WAN_VIDEO.repo_id
+WAN_I2V_MODEL_ID  = WAN_I2V.repo_id
+WAN_MODEL_ID      = WAN_VIDEO.repo_id     # T2V fallback for users who downloaded it
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
 
 # Lazy global
@@ -33,48 +37,87 @@ def _get_device_and_dtype():
     return "cpu", torch.float32
 
 
+def _try_load_wan(model_id: str, kwargs: dict):
+    """Attempt to load a Wan pipeline, preferring the dedicated I2V class."""
+    try:
+        from diffusers import WanImageToVideoPipeline  # added in diffusers ~0.33
+        return WanImageToVideoPipeline.from_pretrained(model_id, **kwargs), "wan"
+    except (ImportError, AttributeError):
+        pass
+    except Exception as exc:
+        raise  # re-raise real loading errors (e.g. missing weights)
+    # Older diffusers: AutoPipeline handles both I2V and T2V Wan variants
+    from diffusers import AutoPipelineForVideoGeneration
+    return AutoPipelineForVideoGeneration.from_pretrained(model_id, **kwargs), "wan"
+
+
 def _load_pipeline(model_id: str = "", hf_token: str = ""):
-    """Load the video generation pipeline."""
+    """Load the video generation pipeline.
+
+    Tries models in preference order when no model_id is supplied:
+      WAN_I2V → WAN_VIDEO (T2V fallback) → CogVideoX
+    Raises RuntimeError with a user-friendly message only when every
+    candidate fails so that generate_video() can surface it clearly.
+    """
     global _pipeline, _pipeline_type
 
     if _pipeline is not None:
         return
 
-
     device, dtype = _get_device_and_dtype()
-
-    if not model_id:
-        model_id = WAN_MODEL_ID
-
-    log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
     kwargs: dict = {"torch_dtype": dtype}
     if hf_token:
         kwargs["token"] = hf_token
 
-    if "CogVideo" in model_id:
-        from diffusers import CogVideoXImageToVideoPipeline
-
-        _pipeline = CogVideoXImageToVideoPipeline.from_pretrained(
-            model_id, **kwargs
-        )
-        _pipeline_type = "cogvideo"
+    # Build candidate list
+    if model_id:
+        candidates = [model_id]
     else:
-        # Wan2.1 pipeline
-        from diffusers import AutoPipelineForVideoGeneration
+        candidates = [WAN_I2V_MODEL_ID, WAN_MODEL_ID, COGVIDEO_MODEL_ID]
 
-        _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
-            model_id, **kwargs
-        )
-        _pipeline_type = "wan"
+    last_exc: Exception | None = None
+    for mid in candidates:
+        log.info("Loading video pipeline: %s on %s ...", mid, device)
+        try:
+            if "CogVideo" in mid:
+                from diffusers import CogVideoXImageToVideoPipeline
+                pipe = CogVideoXImageToVideoPipeline.from_pretrained(mid, **kwargs)
+                ptype = "cogvideo"
+            else:
+                pipe, ptype = _try_load_wan(mid, kwargs)
 
-    # Enable CPU offloading for large models
-    if device == "cuda":
-        _pipeline.enable_model_cpu_offload()
-    else:
-        _pipeline.to(device)
+            # Move to device / enable offloading
+            if device == "cuda":
+                pipe.enable_model_cpu_offload()
+                # Reduce peak VRAM during VAE decode; no quality impact
+                try:
+                    pipe.enable_vae_slicing()
+                except AttributeError:
+                    pass
+                try:
+                    pipe.enable_vae_tiling()
+                except AttributeError:
+                    pass
+            else:
+                pipe.to(device)
 
-    log.info("Video pipeline loaded: %s", _pipeline_type)
+            _pipeline = pipe
+            _pipeline_type = ptype
+            log.info("Video pipeline loaded: %s (%s)", ptype, mid)
+            return
+
+        except Exception as exc:
+            log.warning("Failed to load video model %s: %s — trying next candidate", mid, exc)
+            last_exc = exc
+            _pipeline = None
+            _pipeline_type = None
+
+    raise RuntimeError(
+        "No video model available. "
+        "Download Wan2.1-I2V (recommended) or CogVideoX from the Models page, "
+        "then try again."
+    ) from last_exc
 
 
 def unload() -> None:
@@ -112,7 +155,7 @@ def generate_video(
         image_path:   Source image to animate.
         prompt:       Motion/scene description.
         output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
+        model_id:     HuggingFace model ID (defaults to Wan2.1-I2V).
         hf_token:     HuggingFace token for model download.
         num_frames:   Number of video frames to generate.
         steps:        Diffusion inference steps.
@@ -137,9 +180,17 @@ def generate_video(
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
+        # Load source image and resize to a standard Wan2.1 resolution while
+        # preserving aspect ratio. Portrait input → 480×832; landscape/square
+        # → 832×480. Forcing all input to 832×480 (the previous behaviour)
+        # produced distorted, landscape-cropped videos for portrait photos.
         source = Image.open(image_path).convert("RGB")
-        source = source.resize((832, 480), Image.LANCZOS)
+        src_w, src_h = source.size
+        if src_h > src_w:
+            new_w, new_h = 480, 832   # portrait
+        else:
+            new_w, new_h = 832, 480   # landscape / square
+        source = source.resize((new_w, new_h), Image.LANCZOS)
 
         if seed < 0:
             seed = random.randint(0, 2**32 - 1)
@@ -158,7 +209,6 @@ def generate_video(
             generator=generator,
         )
 
-        # Export frames to video
         if progress_cb:
             progress_cb("Saving video...")
 

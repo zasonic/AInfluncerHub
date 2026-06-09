@@ -31,6 +31,13 @@ SDXL_BASE = ModelSpec(
     required=True,
 )
 
+SDXL_VAE_FP16_FIX = ModelSpec(
+    repo_id="madebyollin/sdxl-vae-fp16-fix",
+    purpose="Numerically stable fp16 VAE for SDXL — prevents blurry/oversaturated output (Steps 2, 4, 5)",
+    size_gb=0.16,
+    required=False,
+)
+
 IP_ADAPTER = ModelSpec(
     repo_id="h94/IP-Adapter",
     purpose="Face-consistent dataset generation (Step 2)",
@@ -54,28 +61,41 @@ JOY_CAPTIONER = ModelSpec(
     required=False,
 )
 
+# Dedicated image-to-video model — purpose-built for animating a still image.
+# Preferred over WAN_VIDEO for the Step 5 animation workflow.
+WAN_I2V = ModelSpec(
+    repo_id="Wan-AI/Wan2.1-I2V-14B-Diffusers",
+    purpose="Image-to-video animation, preferred (Step 5)",
+    size_gb=28.0,
+    required=False,
+)
+
+# Text-to-video model kept for users who already downloaded it; used as
+# a fallback when WAN_I2V is not available.
 WAN_VIDEO = ModelSpec(
     repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
+    purpose="Text-to-video animation, fallback (Step 5)",
     size_gb=28.0,
     required=False,
 )
 
 COGVIDEO = ModelSpec(
     repo_id="THUDM/CogVideoX-5b-I2V",
-    purpose="Fallback image-to-video model (Step 5)",
+    purpose="Last-resort image-to-video fallback (Step 5)",
     size_gb=10.0,
     required=False,
 )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
+    "sdxl_vae_fp16":    SDXL_VAE_FP16_FIX,
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
+    "wan_i2v":          WAN_I2V,
     "wan_video":        WAN_VIDEO,
     "cogvideo":         COGVIDEO,
 }
