@@ -33,6 +33,59 @@ log = logging.getLogger("hub.trainer")
 BASE_MODEL_ID = SDXL_BASE.repo_id
 
 
+def _check_vram_and_adjust(
+    rank: int,
+    emit: "Callable[[str], None]",
+) -> int:
+    """
+    Check available VRAM and reduce LoRA rank if the GPU is too small.
+
+    SDXL UNet alone is ~6.5 GB at fp16. Rules of thumb for comfortable training:
+      < 8 GB  → cap rank at 4 (borderline; OOM is likely above this)
+      8–12 GB → cap rank at 8
+      ≥ 12 GB → no change
+
+    Returns the (possibly reduced) rank. CPU training is left untouched.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return rank
+        props = torch.cuda.get_device_properties(0)
+        total_gb = props.total_memory / (1024 ** 3)
+
+        if total_gb < 8:
+            adjusted = min(rank, 4)
+            if adjusted < rank:
+                emit(
+                    f"⚠️  GPU has {total_gb:.1f} GB VRAM. "
+                    f"Reducing LoRA rank {rank} → {adjusted} to avoid out-of-memory. "
+                    "For best quality, use a GPU with 12+ GB VRAM."
+                )
+            else:
+                emit(
+                    f"⚠️  GPU has {total_gb:.1f} GB VRAM — training may be slow or OOM. "
+                    "12+ GB VRAM recommended."
+                )
+            return adjusted
+
+        if total_gb < 12:
+            adjusted = min(rank, 8)
+            if adjusted < rank:
+                emit(
+                    f"⚠️  GPU has {total_gb:.1f} GB VRAM. "
+                    f"Reducing LoRA rank {rank} → {adjusted} for stability."
+                )
+            return adjusted
+
+        emit(f"GPU: {props.name} ({total_gb:.1f} GB VRAM) ✓")
+        return rank
+
+    except Exception:
+        return rank
+
+
 def prepare_training_folder(
     dataset_dir: Path,
     captions_dir: Path,
@@ -84,6 +137,8 @@ def run_training(
     output_dir.mkdir(parents=True, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
+
+    rank = _check_vram_and_adjust(rank, _emit)
 
     # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
 
@@ -191,8 +246,18 @@ def run_training(
             self.tokenizer_1 = tokenizer_1
             self.tokenizer_2 = tokenizer_2
             self.transform = transforms.Compose([
-                transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(resolution),
+                transforms.Resize(
+                    int(resolution * 1.05),
+                    interpolation=transforms.InterpolationMode.BILINEAR,
+                ),
+                # Slight scale/ratio jitter gives modest augmentation without
+                # distorting face geometry (scale range kept tight: 95-100%).
+                transforms.RandomResizedCrop(
+                    resolution,
+                    scale=(0.95, 1.0),
+                    ratio=(0.97, 1.03),
+                    interpolation=transforms.InterpolationMode.BILINEAR,
+                ),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
@@ -298,8 +363,16 @@ def run_training(
             # Pooled output from text_encoder_2
             pooled_prompt_embeds = encoder_output_2[0]
 
-        # Add noise
-        noise = torch.randn_like(latents)
+        # Add noise — with offset (Ke et al. 2023) to improve brightness/contrast range.
+        # The per-sample bias torch.randn(B,1,1,1) broadcasts across spatial dims,
+        # shifting each image's noise floor independently. Falls back to plain randn.
+        try:
+            noise = torch.randn_like(latents) + 0.05 * torch.randn(
+                latents.shape[0], 1, 1, 1,
+                device=latents.device, dtype=latents.dtype,
+            )
+        except Exception:
+            noise = torch.randn_like(latents)
         timesteps = torch.randint(
             0, noise_scheduler.config.num_train_timesteps,
             (latents.shape[0],), device=device,

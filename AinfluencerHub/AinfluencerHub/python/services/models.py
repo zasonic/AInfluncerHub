@@ -40,6 +40,17 @@ IP_ADAPTER = ModelSpec(
     weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors",
 )
 
+# Upgrade: FaceID-PlusV2 uses InsightFace identity embeddings for stronger face
+# consistency across varied poses/lighting. Optional — falls back to IP_ADAPTER
+# when not downloaded.
+IP_ADAPTER_FACEID = ModelSpec(
+    repo_id="h94/IP-Adapter-FaceID",
+    purpose="Face-consistent dataset generation using identity embeddings (Step 2, upgrade)",
+    size_gb=2.1,
+    required=False,
+    weight_name="ip-adapter-faceid-plusv2_sdxl.bin",
+)
+
 FLORENCE_CAPTIONER = ModelSpec(
     repo_id="microsoft/Florence-2-large",
     purpose="Fast image captioning (Step 3)",
@@ -74,6 +85,7 @@ COGVIDEO = ModelSpec(
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
     "ip_adapter":       IP_ADAPTER,
+    "ip_adapter_faceid": IP_ADAPTER_FACEID,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
     "wan_video":        WAN_VIDEO,

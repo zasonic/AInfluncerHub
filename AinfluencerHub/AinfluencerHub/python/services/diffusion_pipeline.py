@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import IP_ADAPTER, IP_ADAPTER_FACEID, SDXL_BASE
 
 log = logging.getLogger("hub.diffusion")
 
@@ -120,10 +120,42 @@ def _extract_face_embedding(image_path: Path):
 
 
 def _prepare_face_image(image_path: Path):
-    """Load and prepare a face image for IP-Adapter."""
+    """Load and prepare a face image for IP-Adapter.
+
+    Uses InsightFace to detect and crop to the face region with padding.
+    A tighter face crop gives IP-Adapter more accurate identity signal and
+    produces more consistent faces across generated images. Falls back
+    gracefully to the full image when no face is detected.
+    """
+    import numpy as np
     from PIL import Image
 
     img = Image.open(image_path).convert("RGB")
+
+    try:
+        import cv2
+
+        app = _get_face_app()
+        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        faces = app.get(img_cv)
+        if faces:
+            face = max(
+                faces,
+                key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
+            )
+            x1, y1, x2, y2 = [int(c) for c in face.bbox]
+            w, h = x2 - x1, y2 - y1
+            pad_x = int(w * 0.25)
+            pad_y = int(h * 0.30)
+            x1 = max(0, x1 - pad_x)
+            y1 = max(0, y1 - pad_y)
+            x2 = min(img.width, x2 + pad_x)
+            y2 = min(img.height, y2 + pad_y)
+            img = img.crop((x1, y1, x2, y2))
+            log.info("InsightFace: using face crop %dx%d for IP-Adapter", x2 - x1, y2 - y1)
+    except Exception as exc:
+        log.debug("Face crop skipped, using full image: %s", exc)
+
     return img
 
 
