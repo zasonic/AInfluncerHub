@@ -21,9 +21,12 @@ bitsandbytes>=0.43.0,<1.0.0
 torch>=2.1.0,<3.0.0
 torchvision>=0.16.0,<1.0.0
 
-# Face-consistent generation (IP-Adapter)
+# Face-consistent generation (IP-Adapter + identity scoring)
 insightface>=0.7.3,<1.0.0
 onnxruntime-gpu>=1.17.0,<2.0.0
+
+# Qwen2.5-VL captioner
+qwen-vl-utils>=0.0.8,<1.0.0
 
 # Video generation
 imageio[ffmpeg]>=2.31.0,<3.0.0

@@ -12,9 +12,10 @@ def test_all_specs_have_repo_id():
 
 def test_ip_adapter_has_subartifact_info():
     # IP-Adapter must point to a specific weight file — generation breaks otherwise.
+    # FaceID variants ship as .bin; the plus-face adapters ship as .safetensors.
     assert models.IP_ADAPTER.subfolder == "sdxl_models"
     assert models.IP_ADAPTER.weight_name and models.IP_ADAPTER.weight_name.endswith(
-        ".safetensors"
+        (".safetensors", ".bin")
     )
 
 

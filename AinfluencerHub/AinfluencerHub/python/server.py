@@ -244,6 +244,22 @@ def score_dataset(slug: str):
     passed = [r for r in results if r["passed"]]
     return {"scores": results, "passed": len(passed), "total": len(results)}
 
+
+@app.post("/api/dataset/{slug}/score-identity")
+def score_dataset_identity(slug: str):
+    """Score face identity similarity vs the project's reference image."""
+    proj = _load_project(slug)
+    images = proj.dataset_images()
+    if not images:
+        raise HTTPException(400, "No dataset images to score.")
+    refs = proj.reference_images()
+    if not refs:
+        raise HTTPException(400, "No reference image found for this project.")
+    from services.quality_scorer import score_identity_similarity
+    results = score_identity_similarity(images, refs[0])
+    passed = [r for r in results if r["passed"]]
+    return {"scores": results, "passed": len(passed), "total": len(results)}
+
 # ── Captions ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/captions/{slug}")
@@ -313,6 +329,8 @@ async def run_captioning(
         try:
             if captioner == "joycaption":
                 from services.joy_captioner import caption_batch
+            elif captioner == "qwen":
+                from services.qwen_captioner import caption_batch
             else:
                 from services.florence_captioner import caption_batch
             caption_batch(
@@ -338,11 +356,12 @@ async def run_captioning(
 
 @app.get("/api/training/{slug}/start")
 async def start_training(
-    slug:     str,
-    hf_token: str = Query(""),
-    steps:    int = Query(2000),
-    rank:     int = Query(16),
-    lr:       str = Query("1e-4"),
+    slug:       str,
+    hf_token:   str = Query(""),
+    steps:      int = Query(2000),
+    rank:       int = Query(16),
+    lr:         str = Query("1e-4"),
+    base_model: str = Query("sdxl"),
 ):
     """Start native LoRA training using diffusers + peft."""
     proj = _load_project(slug)
@@ -379,6 +398,7 @@ async def start_training(
                 steps=steps,
                 rank=rank,
                 learning_rate=float(lr),
+                base_model=base_model,
                 hf_token=hf_token,
                 log_cb=lambda line: q.put({"type": "log", "line": line}),
                 cancel_event=cancel,

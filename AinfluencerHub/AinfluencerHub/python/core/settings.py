@@ -32,7 +32,7 @@ class SettingsModel(BaseModel):
     lora_rank:       int                              = Field(16, ge=2, le=256)
     learning_rate:   str                              = "1e-4"
     preferred_model: str                              = "sdxl"
-    video_model:     str                              = "wan2.1"
+    video_model:     Literal["wan2.1", "cogvideo", "ltx"] = "wan2.1"
     theme:           Literal["dark"]                  = "dark"
     last_project:    str                              = ""
     setup_complete:  bool                             = False

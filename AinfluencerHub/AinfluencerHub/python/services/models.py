@@ -34,10 +34,10 @@ SDXL_BASE = ModelSpec(
 IP_ADAPTER = ModelSpec(
     repo_id="h94/IP-Adapter",
     purpose="Face-consistent dataset generation (Step 2)",
-    size_gb=1.8,
+    size_gb=0.8,
     required=True,
     subfolder="sdxl_models",
-    weight_name="ip-adapter-plus-face_sdxl_vit-h.safetensors",
+    weight_name="ip-adapter-faceid-plusv2_sdxl.bin",
 )
 
 FLORENCE_CAPTIONER = ModelSpec(
@@ -51,6 +51,20 @@ JOY_CAPTIONER = ModelSpec(
     repo_id="fancyfeast/llama-joycaption-beta-one-hf-llava",
     purpose="Training-optimized captioning (Step 3)",
     size_gb=10.0,
+    required=False,
+)
+
+QWEN_CAPTIONER = ModelSpec(
+    repo_id="Qwen/Qwen2.5-VL-7B-Instruct",
+    purpose="High-quality captioning, 4-bit ~4 GB VRAM (Step 3)",
+    size_gb=7.0,
+    required=False,
+)
+
+FLUX_BASE = ModelSpec(
+    repo_id="black-forest-labs/FLUX.1-dev",
+    purpose="Photorealistic image generation + LoRA training (Steps 2, 4, 5)",
+    size_gb=23.0,
     required=False,
 )
 
@@ -68,16 +82,26 @@ COGVIDEO = ModelSpec(
     required=False,
 )
 
+LTX_VIDEO = ModelSpec(
+    repo_id="Lightricks/LTX-Video",
+    purpose="Fast image-to-video, 8 GB VRAM (Step 5)",
+    size_gb=13.0,
+    required=False,
+)
+
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
+    "flux_base":        FLUX_BASE,
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
+    "qwen":             QWEN_CAPTIONER,
     "wan_video":        WAN_VIDEO,
     "cogvideo":         COGVIDEO,
+    "ltx_video":        LTX_VIDEO,
 }
 
 

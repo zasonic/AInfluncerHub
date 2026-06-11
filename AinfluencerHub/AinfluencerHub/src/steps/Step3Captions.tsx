@@ -18,7 +18,7 @@ export function Step3Captions({ onAdvance }: Props) {
   const [selected,  setSelected]  = useState<{ path: string; filename: string } | null>(null);
   const [editText,  setEditText]  = useState("");
   const [dirty,     setDirty]     = useState(false);
-  const [captioner, setCaptioner] = useState<"florence2" | "joycaption">("florence2");
+  const [captioner, setCaptioner] = useState<"florence2" | "joycaption" | "qwen">("florence2");
 
   const slug = activeProject?.slug ?? "";
   const op   = useAsyncOperation();
@@ -74,7 +74,7 @@ export function Step3Captions({ onAdvance }: Props) {
   const runAutocaption = () => {
     if (!slug) return;
     const hf_token = settings?.hf_token ?? "";
-    const modelLabel = captioner === "joycaption" ? "JoyCaption" : "Florence2";
+    const modelLabel = captioner === "joycaption" ? "JoyCaption" : captioner === "qwen" ? "Qwen2.5-VL" : "Florence2";
     op.start(`Loading ${modelLabel}...`, images.length);
     sse.start(api.startCaptioning(slug, hf_token, captioner));
   };
@@ -259,7 +259,7 @@ export function Step3Captions({ onAdvance }: Props) {
             <div className="field" style={{ margin: "0 0 10px 0" }}>
               <label style={{ fontSize: 11 }}>Captioning model</label>
               <div className="flex gap-8">
-                {(["florence2", "joycaption"] as const).map((c) => (
+                {(["florence2", "joycaption", "qwen"] as const).map((c) => (
                   <label
                     key={c}
                     style={{
@@ -274,7 +274,11 @@ export function Step3Captions({ onAdvance }: Props) {
                       onChange={() => setCaptioner(c)}
                       style={{ accentColor: "var(--accent)" }}
                     />
-                    {c === "florence2" ? "Florence-2 (fast, 4 GB)" : "JoyCaption (best, 10 GB)"}
+                    {c === "florence2"
+                      ? "Florence-2 (fast, 4 GB)"
+                      : c === "joycaption"
+                      ? "JoyCaption (quality, 10 GB)"
+                      : "Qwen2.5-VL (best, ~4 GB)"}
                   </label>
                 ))}
               </div>

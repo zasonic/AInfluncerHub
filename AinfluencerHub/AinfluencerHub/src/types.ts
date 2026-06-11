@@ -22,7 +22,7 @@ export interface AppSettings {
   lora_rank:           number;
   learning_rate:       string;
   preferred_model:     string;
-  video_model:         string;
+  video_model:         "wan2.1" | "cogvideo" | "ltx";
   theme:               "dark";
   last_project:        string;
   setup_complete:      boolean;

@@ -75,9 +75,10 @@ export function Step4Training({ onAdvance }: Props) {
     }
     setDone(false);
     setLogLines([]);
-    op.start(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`, steps);
-    addLog(`Starting training: ${steps} steps, rank ${rank}, lr ${lr}`);
-    sse.start(api.startTraining(slug, hfToken.trim(), steps, rank, lr));
+    const baseModel = settings?.preferred_model ?? "sdxl";
+    op.start(`Starting training: ${steps} steps, rank ${rank}, lr ${lr} [${baseModel.toUpperCase()}]`, steps);
+    addLog(`Starting training: ${steps} steps, rank ${rank}, lr ${lr} [${baseModel.toUpperCase()}]`);
+    sse.start(api.startTraining(slug, hfToken.trim(), steps, rank, lr, baseModel));
   };
 
   const cancelTraining = () => {

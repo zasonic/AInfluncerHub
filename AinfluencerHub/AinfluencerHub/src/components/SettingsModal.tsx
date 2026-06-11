@@ -117,11 +117,12 @@ export function SettingsModal({ onClose }: Props) {
           <label>Video model</label>
           <select
             value={String(form.video_model ?? "wan2.1")}
-            onChange={(e) => setForm((f) => ({ ...f, video_model: e.target.value }))}
+            onChange={(e) => setForm((f) => ({ ...f, video_model: e.target.value as AppSettings["video_model"] }))}
             style={{ width: "100%", fontSize: 12 }}
           >
-            <option value="wan2.1">Wan 2.1 (best quality)</option>
-            <option value="cogvideo">CogVideoX (lighter)</option>
+            <option value="wan2.1">Wan 2.1 (best quality, 28 GB)</option>
+            <option value="cogvideo">CogVideoX (lighter, 10 GB)</option>
+            <option value="ltx">LTX-Video (fastest, 8 GB)</option>
           </select>
           <span className="field-hint">Model for image-to-video animation.</span>
         </div>

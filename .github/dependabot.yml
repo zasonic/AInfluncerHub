@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /AinfluencerHub/AinfluencerHub/python
+    schedule:
+      interval: weekly
+    groups:
+      huggingface:
+        patterns:
+          - "diffusers"
+          - "transformers"
+          - "accelerate"
+          - "peft"
+          - "huggingface_hub"
+          - "safetensors"
+
+  - package-ecosystem: npm
+    directory: /AinfluencerHub/AinfluencerHub
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /AinfluencerHub/AinfluencerHub/src-tauri
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

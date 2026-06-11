@@ -80,3 +80,78 @@ def score_images(
 
     unload_models()
     return results
+
+
+# Identity similarity threshold — images below this are flagged as not matching the reference
+IDENTITY_THRESHOLD = 0.35
+
+
+def score_identity_similarity(
+    image_paths: list[Path],
+    reference_path: Path,
+    progress_cb=None,
+) -> list[dict]:
+    """
+    Score face identity similarity between generated images and a reference photo.
+
+    Uses InsightFace ArcFace embeddings (cosine similarity, 0–1 scale).
+    Complements the aesthetic quality scores from score_images() — use both together
+    to filter out images that are high-quality but don't resemble the reference face.
+
+    Returns list of dicts: {path, filename, similarity, passed}
+    """
+    import cv2
+    import numpy as np
+    from insightface.app import FaceAnalysis
+
+    app = FaceAnalysis(
+        name="buffalo_l",
+        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    app.prepare(ctx_id=0, det_size=(640, 640))
+
+    # Extract reference face embedding
+    ref_img = cv2.imread(str(reference_path))
+    if ref_img is None:
+        log.error("Could not read reference image: %s", reference_path)
+        return []
+    ref_faces = app.get(ref_img)
+    if not ref_faces:
+        log.warning("No face detected in reference image %s", reference_path.name)
+        return []
+    ref_emb = ref_faces[0].normed_embedding  # shape (512,), already L2-normalized
+
+    results = []
+    total = len(image_paths)
+
+    for i, img_path in enumerate(image_paths):
+        try:
+            img = cv2.imread(str(img_path))
+            faces = app.get(img) if img is not None else []
+            if faces:
+                # Use the largest detected face
+                face = max(
+                    faces,
+                    key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
+                )
+                similarity = float(np.dot(ref_emb, face.normed_embedding))
+            else:
+                similarity = 0.0
+        except Exception as exc:
+            log.warning("Identity scoring failed for %s: %s", img_path.name, exc)
+            similarity = 0.0
+
+        results.append({
+            "path":       str(img_path),
+            "filename":   img_path.name,
+            "similarity": round(max(0.0, similarity), 3),
+            "passed":     similarity >= IDENTITY_THRESHOLD,
+        })
+        if progress_cb:
+            progress_cb(i + 1, total, f"Identity scoring {i + 1}/{total}")
+
+    del app
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    log.info("Identity scoring complete: %d images", len(results))
+    return results

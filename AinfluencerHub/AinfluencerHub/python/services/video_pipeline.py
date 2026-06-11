@@ -12,12 +12,13 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import COGVIDEO, WAN_VIDEO
+from services.models import COGVIDEO, LTX_VIDEO, WAN_VIDEO
 
 log = logging.getLogger("hub.video")
 
 WAN_MODEL_ID = WAN_VIDEO.repo_id
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
+LTX_MODEL_ID = LTX_VIDEO.repo_id
 
 # Lazy global
 _pipeline = None
@@ -59,6 +60,11 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
             model_id, **kwargs
         )
         _pipeline_type = "cogvideo"
+    elif "LTX" in model_id or "ltx" in model_id.lower():
+        from diffusers import LTXImageToVideoPipeline
+
+        _pipeline = LTXImageToVideoPipeline.from_pretrained(model_id, **kwargs)
+        _pipeline_type = "ltx"
     else:
         # Wan2.1 pipeline
         from diffusers import AutoPipelineForVideoGeneration
@@ -137,9 +143,12 @@ def generate_video(
         if progress_cb:
             progress_cb("Preparing source image...")
 
-        # Load and resize source image
+        # Load and resize source image — resolution depends on model
         source = Image.open(image_path).convert("RGB")
-        source = source.resize((832, 480), Image.LANCZOS)
+        if _pipeline_type == "ltx":
+            source = source.resize((768, 512), Image.LANCZOS)
+        else:
+            source = source.resize((832, 480), Image.LANCZOS)
 
         if seed < 0:
             seed = random.randint(0, 2**32 - 1)
@@ -148,15 +157,26 @@ def generate_video(
         if progress_cb:
             progress_cb("Generating video... this may take several minutes.")
 
-        result = _pipeline(
-            image=source,
-            prompt=prompt,
-            negative_prompt="",
-            num_frames=num_frames,
-            num_inference_steps=steps,
-            guidance_scale=cfg,
-            generator=generator,
-        )
+        if _pipeline_type == "ltx":
+            result = _pipeline(
+                image=source,
+                prompt=prompt,
+                negative_prompt="worst quality, inconsistent motion, blurry, jittery",
+                num_frames=num_frames,
+                num_inference_steps=steps,
+                guidance_scale=cfg,
+                generator=generator,
+            )
+        else:
+            result = _pipeline(
+                image=source,
+                prompt=prompt,
+                negative_prompt="",
+                num_frames=num_frames,
+                num_inference_steps=steps,
+                guidance_scale=cfg,
+                generator=generator,
+            )
 
         # Export frames to video
         if progress_cb:
