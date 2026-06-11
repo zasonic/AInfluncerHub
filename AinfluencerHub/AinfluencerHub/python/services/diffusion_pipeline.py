@@ -4,6 +4,7 @@ services/diffusion_pipeline.py — Native image generation using HuggingFace dif
 Replaces ComfyUI for all image generation:
   - Face-consistent dataset generation via IP-Adapter-FaceID
   - Text-to-image with trained LoRA weights
+  - Fast text-to-image via FLUX.1-schnell (4 steps, Apache 2.0)
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
@@ -113,7 +114,12 @@ def _extract_face_embedding(image_path: Path):
 
     faces = app.get(img)
     if not faces:
-        raise ValueError(f"No face detected in {image_path.name}")
+        raise ValueError(
+            f"No face detected in '{image_path.name}'. "
+            "For best results, use a clear photo where your face is "
+            "well-lit, front-facing, fully visible, and not obscured by "
+            "glasses, hats, or heavy shadows."
+        )
 
     # Use the largest face
     face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
@@ -295,3 +301,119 @@ def generate_image(
             except Exception:
                 pass
         unload()
+
+
+def generate_image_schnell(
+    positive_prompt: str,
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 4,
+    seed: int = -1,
+    output_dir: Path | None = None,
+    hf_token: str = "",
+    progress_cb: Callable[[str], None] | None = None,
+) -> list[Path]:
+    """
+    Generate an image using FLUX.1-schnell: 4 steps, Apache 2.0, no HF token.
+
+    FLUX.1-schnell is a guidance-free distilled model (cfg=0). It produces
+    high-quality images ~4x faster than SDXL at 20 steps. Because it is
+    distilled, SDXL LoRA weights are NOT compatible — use generate_image()
+    when you want to apply a trained LoRA.
+
+    Safe fallback: if FluxPipeline is unavailable (diffusers too old, model
+    not downloaded) the function falls back to generate_image() transparently
+    so the user always gets a result.
+
+    hf_token is accepted for signature compatibility but is not required
+    for FLUX.1-schnell (Apache 2.0). It is forwarded to the SDXL fallback
+    path only.
+    """
+    import torch
+
+    from services.models import FLUX_SCHNELL
+
+    if output_dir is None:
+        output_dir = Path("output") / "generated"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    device, _ = _get_device_and_dtype()
+    # Schnell works best with bfloat16; fall back to float32 on CPU
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+    try:
+        from diffusers import FluxPipeline
+    except (ImportError, Exception) as exc:
+        log.warning("FluxPipeline unavailable (%s) — falling back to SDXL", exc)
+        return generate_image(
+            positive_prompt=positive_prompt,
+            width=width,
+            height=height,
+            seed=seed,
+            output_dir=output_dir,
+            hf_token=hf_token,
+            progress_cb=progress_cb,
+        )
+
+    if progress_cb:
+        progress_cb("Loading FLUX.1-schnell (4-step, Apache 2.0, no token needed)...")
+
+    pipeline = None
+    try:
+        pipeline = FluxPipeline.from_pretrained(
+            FLUX_SCHNELL.repo_id,
+            torch_dtype=dtype,
+        )
+        # CPU offload keeps peak VRAM lower than moving everything to GPU at once
+        pipeline.enable_model_cpu_offload()
+
+        if seed < 0:
+            seed = random.randint(0, 2**32 - 1)
+
+        generator = torch.Generator().manual_seed(seed)
+
+        if progress_cb:
+            progress_cb(f"Generating with FLUX.1-schnell ({steps} steps)...")
+
+        result = pipeline(
+            prompt=positive_prompt,
+            num_inference_steps=steps,
+            guidance_scale=0.0,   # Schnell is guidance-free
+            width=width,
+            height=height,
+            generator=generator,
+        )
+
+        paths: list[Path] = []
+        for idx, image in enumerate(result.images):
+            out_path = output_dir / f"schnell_{seed}_{idx}.png"
+            image.save(out_path)
+            paths.append(out_path)
+
+        if progress_cb:
+            progress_cb(f"Generated {len(paths)} image(s).")
+
+        return paths
+
+    except Exception as exc:
+        log.error("FLUX.1-schnell generation failed (%s) — falling back to SDXL", exc)
+        if progress_cb:
+            progress_cb("FLUX.1-schnell failed — using SDXL as fallback...")
+        return generate_image(
+            positive_prompt=positive_prompt,
+            width=width,
+            height=height,
+            seed=seed,
+            output_dir=output_dir,
+            hf_token=hf_token,
+            progress_cb=progress_cb,
+        )
+    finally:
+        if pipeline is not None:
+            try:
+                del pipeline
+            except Exception:
+                pass
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()

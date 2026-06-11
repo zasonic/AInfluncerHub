@@ -68,6 +68,13 @@ FLUX_BASE = ModelSpec(
     required=False,
 )
 
+FLUX_SCHNELL = ModelSpec(
+    repo_id="black-forest-labs/FLUX.1-schnell",
+    purpose="Fast 4-step image generation, Apache 2.0 — no HF token required (Step 5)",
+    size_gb=12.0,
+    required=False,
+)
+
 WAN_VIDEO = ModelSpec(
     repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
     purpose="Image-to-video animation (Step 5)",
@@ -95,6 +102,7 @@ LTX_VIDEO = ModelSpec(
 ALL: dict[str, ModelSpec] = {
     "sdxl_base":        SDXL_BASE,
     "flux_base":        FLUX_BASE,
+    "flux_schnell":     FLUX_SCHNELL,
     "ip_adapter":       IP_ADAPTER,
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,

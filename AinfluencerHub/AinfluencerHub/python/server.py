@@ -474,8 +474,17 @@ async def generate_image(
     slug:          str,
     prompt:        str   = Query(""),
     lora_strength: float = Query(0.85),
+    base_model:    str   = Query("sdxl"),
 ):
-    """Generate an image using native diffusers pipeline with optional LoRA."""
+    """Generate an image using native diffusers pipeline with optional LoRA.
+
+    base_model values:
+      - "sdxl"         (default) SDXL with optional LoRA weights
+      - "flux_schnell" FLUX.1-schnell, 4-step, Apache 2.0, no HF token needed
+
+    Existing callers that omit base_model continue to use SDXL unchanged.
+    FLUX.1-schnell does not apply LoRA weights (SDXL LoRAs are not compatible).
+    """
     proj = _load_project(slug)
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
@@ -484,20 +493,33 @@ async def generate_image(
 
     def _run():
         try:
-            lora = proj.lora_path()
-            from services.diffusion_pipeline import generate_image as _generate
             hf_token = settings.get("hf_token", "")
             q.put({"type": "progress", "done": 0, "total": 1, "message": "Starting generation..."})
-            paths = _generate(
-                positive_prompt=prompt,
-                lora_path=str(lora) if lora else "",
-                lora_strength=lora_strength,
-                output_dir=proj.generated_dir,
-                hf_token=hf_token,
-                progress_cb=lambda msg: q.put(
-                    {"type": "progress", "done": 0, "total": 1, "message": msg}
-                ),
-            )
+
+            if base_model == "flux_schnell":
+                from services.diffusion_pipeline import generate_image_schnell as _gen
+                paths = _gen(
+                    positive_prompt=prompt,
+                    output_dir=proj.generated_dir,
+                    hf_token=hf_token,
+                    progress_cb=lambda msg: q.put(
+                        {"type": "progress", "done": 0, "total": 1, "message": msg}
+                    ),
+                )
+            else:
+                lora = proj.lora_path()
+                from services.diffusion_pipeline import generate_image as _gen
+                paths = _gen(
+                    positive_prompt=prompt,
+                    lora_path=str(lora) if lora else "",
+                    lora_strength=lora_strength,
+                    output_dir=proj.generated_dir,
+                    hf_token=hf_token,
+                    progress_cb=lambda msg: q.put(
+                        {"type": "progress", "done": 0, "total": 1, "message": msg}
+                    ),
+                )
+
             q.put({"type": "done", "message": "Image generated.", "payload": {"paths": [str(p) for p in paths]}})
         except Exception as exc:
             q.put({"type": "error", "message": str(exc)})
