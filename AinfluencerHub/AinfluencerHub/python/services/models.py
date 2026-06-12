@@ -70,7 +70,14 @@ FLUX_BASE = ModelSpec(
 
 WAN_VIDEO = ModelSpec(
     repo_id="Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    purpose="Image-to-video animation (Step 5)",
+    purpose="Text-to-video generation (legacy; use WAN_I2V for animating photos)",
+    size_gb=28.0,
+    required=False,
+)
+
+WAN_I2V = ModelSpec(
+    repo_id="Wan-AI/Wan2.1-I2V-14B-Diffusers",
+    purpose="Image-to-video animation from a still photo (Step 5, preferred)",
     size_gb=28.0,
     required=False,
 )
@@ -99,6 +106,7 @@ ALL: dict[str, ModelSpec] = {
     "florence":         FLORENCE_CAPTIONER,
     "joycaption":       JOY_CAPTIONER,
     "qwen":             QWEN_CAPTIONER,
+    "wan_i2v":          WAN_I2V,
     "wan_video":        WAN_VIDEO,
     "cogvideo":         COGVIDEO,
     "ltx_video":        LTX_VIDEO,

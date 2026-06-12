@@ -193,7 +193,7 @@ def generate_dataset(
                     prompt=full_prompt,
                     negative_prompt="blurry, low quality, watermark, text, deformed",
                     ip_adapter_image_embeds=[face_embedding],
-                    num_inference_steps=20,
+                    num_inference_steps=28,
                     guidance_scale=4.0,
                     width=832,
                     height=1216,

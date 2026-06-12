@@ -2,7 +2,13 @@
 services/video_pipeline.py — Native video generation using HuggingFace diffusers.
 
 Replaces ComfyUI's Wan2.1 I2V workflow with a native diffusers pipeline.
-Supports image-to-video generation using Wan2.1 or CogVideoX as a fallback.
+Supports image-to-video generation using Wan2.1-I2V (preferred), CogVideoX,
+LTX-Video, or the legacy Wan2.1-T2V as a fallback.
+
+v2: Upgraded default model to Wan2.1-I2V-14B (image-to-video) which is
+specifically trained to animate still photos while preserving identity and pose.
+The previous T2V model generated video from text alone and ignored the input
+image. Export FPS raised from 16 to 24 for standard-quality output.
 
 All operations run locally on the user's GPU without external services.
 """
@@ -12,10 +18,11 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import COGVIDEO, LTX_VIDEO, WAN_VIDEO
+from services.models import COGVIDEO, LTX_VIDEO, WAN_I2V, WAN_VIDEO
 
 log = logging.getLogger("hub.video")
 
+WAN_I2V_MODEL_ID = WAN_I2V.repo_id
 WAN_MODEL_ID = WAN_VIDEO.repo_id
 COGVIDEO_MODEL_ID = COGVIDEO.repo_id
 LTX_MODEL_ID = LTX_VIDEO.repo_id
@@ -45,7 +52,7 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
     device, dtype = _get_device_and_dtype()
 
     if not model_id:
-        model_id = WAN_MODEL_ID
+        model_id = WAN_I2V_MODEL_ID
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -65,8 +72,31 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
 
         _pipeline = LTXImageToVideoPipeline.from_pretrained(model_id, **kwargs)
         _pipeline_type = "ltx"
+    elif "I2V" in model_id:
+        # Wan2.1 image-to-video — preferred for animating still photos.
+        # WanImageToVideoPipeline was added in diffusers 0.32; fall back to
+        # AutoPipelineForVideoGeneration on older installs so the app never
+        # hard-fails during a diffusers version transition.
+        try:
+            from diffusers import WanImageToVideoPipeline
+
+            _pipeline = WanImageToVideoPipeline.from_pretrained(model_id, **kwargs)
+            _pipeline_type = "wan_i2v"
+            log.info("Using WanImageToVideoPipeline (I2V).")
+        except ImportError:
+            log.warning(
+                "WanImageToVideoPipeline not found in this diffusers version — "
+                "falling back to AutoPipelineForVideoGeneration. "
+                "Upgrade diffusers>=0.32.0 for best results."
+            )
+            from diffusers import AutoPipelineForVideoGeneration
+
+            _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
+                model_id, **kwargs
+            )
+            _pipeline_type = "wan_i2v"
     else:
-        # Wan2.1 pipeline
+        # Wan2.1 T2V (legacy) or unknown Wan variant
         from diffusers import AutoPipelineForVideoGeneration
 
         _pipeline = AutoPipelineForVideoGeneration.from_pretrained(
@@ -167,6 +197,16 @@ def generate_video(
                 guidance_scale=cfg,
                 generator=generator,
             )
+        elif _pipeline_type == "wan_i2v":
+            # Wan I2V: image is the anchor frame; prompt guides motion.
+            result = _pipeline(
+                image=source,
+                prompt=prompt,
+                num_frames=num_frames,
+                num_inference_steps=steps,
+                guidance_scale=cfg,
+                generator=generator,
+            )
         else:
             result = _pipeline(
                 image=source,
@@ -185,7 +225,7 @@ def generate_video(
         from diffusers.utils import export_to_video
 
         out_path = output_dir / f"video_{image_path.stem}_{seed}.mp4"
-        export_to_video(result.frames[0], str(out_path), fps=16)
+        export_to_video(result.frames[0], str(out_path), fps=24)
 
         if progress_cb:
             progress_cb("Video created successfully.")
