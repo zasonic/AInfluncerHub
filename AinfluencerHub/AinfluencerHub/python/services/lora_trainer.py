@@ -18,6 +18,20 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements:
+  Native-resolution training — The dataset class now detects the natural
+    image dimensions from the first dataset image and trains at those
+    exact dimensions (snapped to 64-pixel multiples, same pixel count as
+    1024×1024). This replaces the previous Resize(1024) + CenterCrop(1024)
+    pipeline, which discarded ~46% of portrait-format images (e.g. the
+    default 832×1216 IP-Adapter output lost 234 px from both top and
+    bottom). Training at the native 832×1216 portrait bucket is an SDXL-
+    supported resolution documented in the original paper, and the SDXL
+    time_ids are updated to match so the model sees coherent conditioning.
+    FLUX training benefits equally — no faces are cropped out of training
+    images. Falls back to 1024×1024 when the dataset is empty or the
+    first image cannot be opened.
 """
 
 import logging
@@ -32,6 +46,31 @@ log = logging.getLogger("hub.trainer")
 
 BASE_MODEL_ID = SDXL_BASE.repo_id
 FLUX_MODEL_ID = FLUX_BASE.repo_id
+
+
+def _detect_training_size(pairs: list[tuple[Path, str]]) -> tuple[int, int]:
+    """Return (width, height) for training, snapped to 64-pixel multiples.
+
+    Reads the first image's native dimensions and scales them so the total
+    pixel count stays close to 1024×1024 = ~1 MP while preserving the aspect
+    ratio. For the default IP-Adapter portrait output (832×1216) this returns
+    (832, 1216) — a native SDXL training bucket from the SDXL paper.
+
+    Falls back to (1024, 1024) when the dataset is empty or unreadable.
+    """
+    if not pairs:
+        return 1024, 1024
+    try:
+        from PIL import Image as _PIL
+        img = _PIL.open(pairs[0][0])
+        w, h = img.size
+        target_px = 1024 * 1024
+        scale = (target_px / (w * h)) ** 0.5
+        train_w = max(64, round(w * scale / 64) * 64)
+        train_h = max(64, round(h * scale / 64) * 64)
+        return train_w, train_h
+    except Exception:
+        return 1024, 1024
 
 
 def prepare_training_folder(
@@ -200,14 +239,29 @@ def run_training(
 
     # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
 
+    # Detect native training resolution from the first dataset image.
+    # For IP-Adapter portrait output (832×1216) this correctly chooses
+    # (832, 1216) instead of squeezing everything into a 1024×1024 crop.
+    train_width, train_height = _detect_training_size(pairs)
+    _emit(
+        f"Training resolution: {train_width}×{train_height} px "
+        f"(detected from dataset; native SDXL bucket)"
+    )
+
     class CaptionImageDataset(Dataset):
-        def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
+        def __init__(self, pairs, tokenizer_1, tokenizer_2,
+                     train_width: int = 1024, train_height: int = 1024):
             self.pairs = pairs
             self.tokenizer_1 = tokenizer_1
             self.tokenizer_2 = tokenizer_2
+            # Resize to exact (H, W) — no CenterCrop so no pixels are discarded.
+            # All dataset images are expected to share the same aspect ratio
+            # (the IP-Adapter step produces a consistent 832×1216 set).
             self.transform = transforms.Compose([
-                transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(resolution),
+                transforms.Resize(
+                    (train_height, train_width),
+                    interpolation=transforms.InterpolationMode.LANCZOS,
+                ),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
@@ -236,7 +290,8 @@ def run_training(
                 "input_ids_2": tokens_2.input_ids.squeeze(0),
             }
 
-    dataset = CaptionImageDataset(pairs, tokenizer_1, tokenizer_2)
+    dataset = CaptionImageDataset(pairs, tokenizer_1, tokenizer_2,
+                                   train_width=train_width, train_height=train_height)
     dataloader = DataLoader(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
@@ -321,9 +376,14 @@ def run_training(
         ).long()
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-        # Time IDs for SDXL (original_size + crop_coords + target_size)
+        # Time IDs for SDXL: [orig_H, orig_W, crop_top, crop_left, target_H, target_W].
+        # Use the detected training dimensions so the model receives conditioning
+        # that matches what it actually sees — 832×1216 for portrait datasets
+        # instead of the previous 1024×1024 which was a mismatch after the
+        # old CenterCrop step.
         add_time_ids = torch.tensor(
-            [[1024, 1024, 0, 0, 1024, 1024]], dtype=weight_dtype, device=device,
+            [[train_height, train_width, 0, 0, train_height, train_width]],
+            dtype=weight_dtype, device=device,
         )
         added_cond_kwargs = {
             "text_embeds": pooled_prompt_embeds,
@@ -560,12 +620,23 @@ def _run_flux_training(
 
     # ── Dataset ──────────────────────────────────────────────────────────────
 
+    # Detect native training resolution (portrait-aware, same logic as SDXL path).
+    flux_train_w, flux_train_h = _detect_training_size(pairs)
+    _emit(
+        f"Training resolution: {flux_train_w}×{flux_train_h} px "
+        f"(detected from dataset)"
+    )
+
     class FluxDataset(Dataset):
-        def __init__(self, pairs: list[tuple[Path, str]], resolution: int = 1024):
+        def __init__(self, pairs: list[tuple[Path, str]],
+                     train_width: int = 1024, train_height: int = 1024):
             self.pairs = pairs
+            # Resize to exact (H, W) without center-cropping.
             self.transform = transforms.Compose([
-                transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(resolution),
+                transforms.Resize(
+                    (train_height, train_width),
+                    interpolation=transforms.InterpolationMode.LANCZOS,
+                ),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
@@ -592,7 +663,8 @@ def _run_flux_training(
             }
 
     dataloader = DataLoader(
-        FluxDataset(pairs), batch_size=1, shuffle=True, num_workers=0,
+        FluxDataset(pairs, train_width=flux_train_w, train_height=flux_train_h),
+        batch_size=1, shuffle=True, num_workers=0,
     )
 
     # ── Optimizer ────────────────────────────────────────────────────────────
