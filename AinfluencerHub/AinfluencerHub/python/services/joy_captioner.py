@@ -22,12 +22,22 @@ _device = None
 
 JOYCAPTION_MODEL_ID = JOY_CAPTIONER.repo_id
 
-# System prompt for training-style captions
+# System prompt tuned for face-identity LoRA training captions.
+# Anchoring physical attributes (hair, eyes, skin, face shape) teaches
+# the model which features belong to the trigger-word subject, improving
+# consistency across diverse poses and settings in generated images.
 CAPTION_PROMPT = (
-    "Write a detailed description of this image for use as a training caption "
-    "for an AI image generation model. Describe the person's appearance, pose, "
-    "expression, clothing, and the setting. Be specific and use natural language. "
-    "Do not start with 'The image shows' or 'This is'. Just describe what you see."
+    "Write a detailed training caption for a diffusion model LoRA. "
+    "Describe the person using natural language in this order: "
+    "(1) hair — length, color, texture, and style; "
+    "(2) face — eye color, eyebrow shape, skin tone, and any distinctive features; "
+    "(3) expression — mood and what it communicates; "
+    "(4) pose and body position; "
+    "(5) clothing and any visible accessories; "
+    "(6) setting and background; "
+    "(7) lighting and photo style (e.g. soft studio, outdoor natural light, dramatic side-lit). "
+    "Be precise with colors and textures. Do not start with 'The image shows' or 'This is a photo'. "
+    "Do not add opinions or commentary. Write as a single flowing paragraph."
 )
 
 
@@ -113,7 +123,7 @@ def caption_image(
     with torch.no_grad():
         generated_ids = _model.generate(
             **inputs,
-            max_new_tokens=300,
+            max_new_tokens=512,
             do_sample=True,
             temperature=0.6,
             top_p=0.9,

@@ -18,6 +18,17 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements:
+  No-flip  — RandomHorizontalFlip removed from both SDXL and FLUX datasets.
+              Human faces are not symmetric — flipping creates conflicting
+              training examples for asymmetric features (moles, hair parts,
+              eye-shape differences). Removing it produces sharper, more
+              consistent face identity in the trained LoRA.
+  Prodigy  — Adaptive optimizer (Mishchenko & Defazio 2023) used for FLUX
+              LoRA training when prodigyopt is installed. Sets lr=1.0 and
+              auto-scales step sizes — eliminates LR tuning entirely for Flux.
+              Falls back to AdamW8bit → AdamW if prodigyopt is not available.
 """
 
 import logging
@@ -205,10 +216,12 @@ def run_training(
             self.pairs = pairs
             self.tokenizer_1 = tokenizer_1
             self.tokenizer_2 = tokenizer_2
+            # Horizontal flip intentionally omitted: face training requires
+            # pixel-consistent identity. Flipping asymmetric features (moles,
+            # hair parts) creates contradictory training signal.
             self.transform = transforms.Compose([
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
-                transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ])
@@ -563,10 +576,11 @@ def _run_flux_training(
     class FluxDataset(Dataset):
         def __init__(self, pairs: list[tuple[Path, str]], resolution: int = 1024):
             self.pairs = pairs
+            # Horizontal flip intentionally omitted: same reason as SDXL path —
+            # face asymmetry makes flips contradict identity during training.
             self.transform = transforms.Compose([
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
-                transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ])
@@ -596,24 +610,41 @@ def _run_flux_training(
     )
 
     # ── Optimizer ────────────────────────────────────────────────────────────
+    # Priority: Prodigy (adaptive, no LR tuning) → AdamW8bit → AdamW.
+    # Prodigy (Mishchenko & Defazio 2023) is strongly recommended for Flux LoRA:
+    # it auto-scales step sizes so lr=1.0 works across all datasets without tuning.
 
+    _using_prodigy = False
     try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(transformer.parameters(), lr=learning_rate, weight_decay=1e-2)
-        _emit("Using AdamW8bit optimizer.")
+        from prodigyopt import Prodigy
+        optimizer = Prodigy(transformer.parameters(), lr=1.0, weight_decay=1e-2)
+        _using_prodigy = True
+        _emit("Using Prodigy optimizer (adaptive LR — no manual tuning needed).")
     except ImportError:
-        optimizer = torch.optim.AdamW(
-            transformer.parameters(), lr=learning_rate, weight_decay=1e-2,
-        )
-        _emit("Using standard AdamW optimizer.")
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(transformer.parameters(), lr=learning_rate, weight_decay=1e-2)
+            _emit("Using AdamW8bit optimizer (install prodigyopt for adaptive LR).")
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                transformer.parameters(), lr=learning_rate, weight_decay=1e-2,
+            )
+            _emit("Using standard AdamW optimizer.")
 
-    warmup_steps = max(50, steps // 20)
-    from torch.optim.lr_scheduler import CosineAnnealingLR
-    lr_scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    # Prodigy handles its own internal LR scaling; use a no-op constant
+    # scheduler so the training loop's lr_scheduler.step() call is safe.
+    warmup_steps = 0 if _using_prodigy else max(50, steps // 20)
+    from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR
+    lr_scheduler = (
+        ConstantLR(optimizer, factor=1.0, total_iters=steps)
+        if _using_prodigy
+        else CosineAnnealingLR(optimizer, T_max=max(1, steps - warmup_steps), eta_min=learning_rate * 0.1)
+    )
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
-    _emit(f"Starting FLUX LoRA training: {steps} steps, rank {rank}, lr {learning_rate}")
+    lr_label = "auto (Prodigy)" if _using_prodigy else str(learning_rate)
+    _emit(f"Starting FLUX LoRA training: {steps} steps, rank {rank}, lr {lr_label}")
 
     gradient_accumulation_steps = 4
     global_step = 0
@@ -674,7 +705,7 @@ def _run_flux_training(
                 lr_scheduler.step()
             optimizer.zero_grad()
 
-        if global_step <= warmup_steps:
+        if not _using_prodigy and global_step <= warmup_steps:
             warmup_lr = learning_rate * (global_step / warmup_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
