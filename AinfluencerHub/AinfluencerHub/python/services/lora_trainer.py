@@ -8,7 +8,7 @@ with a fully native training loop.
 Training produces .safetensors LoRA weights that are directly loadable
 by the diffusion_pipeline for inference.
 
-v2.1 training improvements:
+v2.1 training improvements (SDXL):
   DoRA  — Weight-Decomposed Low-Rank Adaptation (Liu et al., ICLR 2024).
             Decomposes LoRA updates into magnitude + direction components for
             better gradient flow and sharper face identity. Enabled when
@@ -18,6 +18,18 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 training improvements (FLUX):
+  DoRA  — Same Weight-Decomposed LoRA as SDXL, with same peft>=0.9.0 gate
+            and silent fallback to standard LoRA for older installs.
+  Logit-normal timestep sampling — FLUX was trained with a logit-normal
+            distribution over sigma (sigmoid of N(0,1)), concentrating
+            training on mid-noise timesteps where most visual identity is
+            determined.  Uniform sampling wastes steps on near-pure-noise
+            timesteps that rarely affect output quality.  Falls back to
+            uniform on any error so training is never interrupted.
+            (Black Forest Labs training methodology; also validated by the
+            Stable Diffusion 3 paper, Esser et al. 2024.)
 """
 
 import logging
@@ -538,7 +550,7 @@ def _run_flux_training(
 
     from peft import LoraConfig, get_peft_model
 
-    lora_config = LoraConfig(
+    _lora_base_kwargs = dict(
         r=rank,
         lora_alpha=rank,
         init_lora_weights="gaussian",
@@ -547,6 +559,15 @@ def _run_flux_training(
             "add_k_proj", "add_q_proj", "add_v_proj", "add_out_proj",
         ],
     )
+    # DoRA (Liu et al., ICLR 2024): same improvement as the SDXL path —
+    # decomposes LoRA updates into magnitude + direction components for
+    # sharper face identity. Requires peft >= 0.9.0; falls back silently.
+    try:
+        lora_config = LoraConfig(**_lora_base_kwargs, use_dora=True)
+        _emit("LoRA adapter: DoRA enabled (peft>=0.9.0) — improved identity consistency")
+    except TypeError:
+        lora_config = LoraConfig(**_lora_base_kwargs)
+        _emit("LoRA adapter: standard LoRA (upgrade peft>=0.9.0 to enable DoRA)")
     transformer = get_peft_model(transformer, lora_config)
     transformer.train()
 
@@ -647,10 +668,22 @@ def _run_flux_training(
             ).last_hidden_state
 
         noise = torch.randn_like(latents)
-        timesteps = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps,
-            (latents.shape[0],), device=device,
-        ).long()
+        # Logit-normal timestep sampling (Black Forest Labs / SD3 methodology).
+        # FLUX was trained with sigma = sigmoid(s), s ~ N(0,1), which
+        # concentrates training on mid-noise timesteps where visual identity
+        # is determined, unlike uniform sampling which wastes steps on
+        # near-pure-noise extremes.  Falls back to uniform on any error.
+        try:
+            s = torch.zeros(latents.shape[0], device=device).normal_(mean=0.0, std=1.0)
+            u = torch.sigmoid(s)
+            timesteps = (u * noise_scheduler.config.num_train_timesteps).long().clamp(
+                0, noise_scheduler.config.num_train_timesteps - 1,
+            )
+        except Exception:
+            timesteps = torch.randint(
+                0, noise_scheduler.config.num_train_timesteps,
+                (latents.shape[0],), device=device,
+            ).long()
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
         model_pred = transformer(
