@@ -18,6 +18,15 @@ v2.1 training improvements:
             sharper detail and more consistent results without extra steps.
             gamma=5.0 (published optimal default). Falls back to standard MSE
             loss on any exception so training is never interrupted.
+
+v2.2 FLUX training improvements:
+  Logit-normal timesteps — Esser et al. 2024 (SD3/FLUX paper). Biases
+            sampling towards intermediate timesteps, which carry the most
+            information for rectified flow / flow matching models. Falls back
+            to uniform sampling on any error.
+  Velocity target — FLUX uses FlowMatchEulerDiscreteScheduler (rectified
+            flow), so the correct training objective is to predict the
+            velocity field (noise - latents), not the epsilon noise.
 """
 
 import logging
@@ -100,7 +109,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────
+    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -119,7 +128,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ──────────────────────────────────────────────
+    # ── Step 2: Load model components ──────────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -163,7 +172,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ───────────────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ────────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -198,7 +207,7 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────
+    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -241,7 +250,7 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -392,7 +401,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ──────────────────────────────────────────────────────────
+    # ── Step 7: Save final LoRA ───────────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"
@@ -457,7 +466,7 @@ def _run_flux_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-    # ── Collect dataset ──────────────────────────────────────────────────────
+    # ── Collect dataset ──────────────────────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -475,7 +484,7 @@ def _run_flux_training(
         return False, f"No image-caption pairs found in {dataset_dir}"
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Load model components ────────────────────────────────────────────────
+    # ── Load model components ───────────────────────────────────────────────────────────────
 
     _emit("Loading FLUX.1-dev components (first run downloads ~23 GB)...")
 
@@ -534,7 +543,7 @@ def _run_flux_training(
     vae.requires_grad_(False)
     transformer.requires_grad_(False)
 
-    # ── Apply LoRA to FLUX transformer ───────────────────────────────────────
+    # ── Apply LoRA to FLUX transformer ───────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -558,7 +567,7 @@ def _run_flux_training(
     )
     transformer.enable_gradient_checkpointing()
 
-    # ── Dataset ──────────────────────────────────────────────────────────────
+    # ── Dataset ────────────────────────────────────────────────────────────────────────
 
     class FluxDataset(Dataset):
         def __init__(self, pairs: list[tuple[Path, str]], resolution: int = 1024):
@@ -595,7 +604,7 @@ def _run_flux_training(
         FluxDataset(pairs), batch_size=1, shuffle=True, num_workers=0,
     )
 
-    # ── Optimizer ────────────────────────────────────────────────────────────
+    # ── Optimizer ─────────────────────────────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -611,9 +620,14 @@ def _run_flux_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Training loop ─────────────────────────────────────────────────────────
+    # ── Training loop ─────────────────────────────────────────────────────────────────────
 
     _emit(f"Starting FLUX LoRA training: {steps} steps, rank {rank}, lr {learning_rate}")
+    _emit(
+        "Timestep sampling: logit-normal (Esser et al. 2024) — "
+        "biases towards informative intermediate timesteps for flow matching"
+    )
+    _emit("Loss target: velocity field (noise − latents) — correct objective for rectified flow")
 
     gradient_accumulation_steps = 4
     global_step = 0
@@ -647,10 +661,23 @@ def _run_flux_training(
             ).last_hidden_state
 
         noise = torch.randn_like(latents)
-        timesteps = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps,
-            (latents.shape[0],), device=device,
-        ).long()
+
+        # Logit-normal timestep sampling (Esser et al. 2024, SD3/FLUX paper).
+        # Draws u ~ N(0,1), maps to (0,1) via sigmoid, concentrating mass at
+        # intermediate timesteps where the flow matching loss is most informative.
+        # Falls back to uniform sampling on any error.
+        try:
+            u = torch.randn(latents.shape[0])
+            t_frac = torch.sigmoid(u).to(device)
+            timesteps = (
+                t_frac * noise_scheduler.config.num_train_timesteps
+            ).long().clamp(0, noise_scheduler.config.num_train_timesteps - 1)
+        except Exception:
+            timesteps = torch.randint(
+                0, noise_scheduler.config.num_train_timesteps,
+                (latents.shape[0],), device=device,
+            ).long()
+
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
         model_pred = transformer(
@@ -660,7 +687,11 @@ def _run_flux_training(
             pooled_projections=clip_embeds,
         ).sample
 
-        loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+        # Velocity target for flow matching: model predicts (noise - latents),
+        # not the epsilon noise. FLUX uses FlowMatchEulerDiscreteScheduler
+        # (rectified flow), so dx/dt = noise - x_0.
+        target = noise - latents
+        loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
         loss = loss / gradient_accumulation_steps
         loss.backward()
 
@@ -691,7 +722,7 @@ def _run_flux_training(
             transformer.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Save final LoRA ───────────────────────────────────────────────────────
+    # ── Save final LoRA ────────────────────────────────────────────────────────────────────
 
     _emit("Saving final FLUX LoRA weights...")
     try:

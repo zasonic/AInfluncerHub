@@ -34,6 +34,30 @@ def _get_device_and_dtype():
     return "cpu", torch.float32
 
 
+def _pick_default_model_id() -> str:
+    """Select the best video model based on available VRAM.
+
+    LTX-Video needs ~8 GB VRAM (13 GB download); Wan2.1 needs ~16 GB (28 GB download).
+    Falls back to LTX-Video when VRAM is unknown to avoid OOM on modest GPUs.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return LTX_MODEL_ID
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        if vram_gb >= 12:
+            log.info("VRAM %.1f GB ≥ 12 GB — using Wan2.1", vram_gb)
+            return WAN_MODEL_ID
+        log.info(
+            "VRAM %.1f GB < 12 GB — selecting LTX-Video (~8 GB) instead of Wan2.1 (~16 GB)",
+            vram_gb,
+        )
+        return LTX_MODEL_ID
+    except Exception:
+        log.warning("Could not detect VRAM; defaulting to LTX-Video for safety.")
+        return LTX_MODEL_ID
+
+
 def _load_pipeline(model_id: str = "", hf_token: str = ""):
     """Load the video generation pipeline."""
     global _pipeline, _pipeline_type
@@ -45,7 +69,7 @@ def _load_pipeline(model_id: str = "", hf_token: str = ""):
     device, dtype = _get_device_and_dtype()
 
     if not model_id:
-        model_id = WAN_MODEL_ID
+        model_id = _pick_default_model_id()
 
     log.info("Loading video pipeline: %s on %s ...", model_id, device)
 
@@ -118,7 +142,7 @@ def generate_video(
         image_path:   Source image to animate.
         prompt:       Motion/scene description.
         output_dir:   Where to save the output video.
-        model_id:     HuggingFace model ID (defaults to Wan2.1).
+        model_id:     HuggingFace model ID (defaults to VRAM-appropriate model).
         hf_token:     HuggingFace token for model download.
         num_frames:   Number of video frames to generate.
         steps:        Diffusion inference steps.
