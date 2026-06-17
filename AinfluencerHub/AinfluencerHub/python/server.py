@@ -151,7 +151,7 @@ async def upload_references(slug: str, files: list[UploadFile] = File(...)):
     proj = _load_project(slug)
     proj.reference_dir.mkdir(parents=True, exist_ok=True)
     count = 0
-    for f in files[:3]:
+    for f in files[:10]:
         suffix = Path(f.filename or "ref.jpg").suffix or ".jpg"
         dest   = proj.reference_dir / f"ref_{count + 1:02d}{suffix}"
         content = await f.read()

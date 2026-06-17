@@ -35,11 +35,18 @@ def _get_device_and_dtype():
 
 
 def _load_base_pipeline(hf_token: str = ""):
-    """Load the SDXL base pipeline."""
+    """Load the SDXL base pipeline with VRAM-aware device placement.
+
+    SDXL at fp16 occupies ~8-10 GB of VRAM. On GPUs below that threshold the
+    pipeline uses sequential CPU offload (diffusers built-in), which keeps the
+    model resident on CPU and streams individual layers to the GPU one at a time.
+    This is ~2-3× slower but prevents silent OOM crashes for users with 8 GB GPUs.
+    """
     global _pipeline
     if _pipeline is not None:
         return
 
+    import torch
     from diffusers import StableDiffusionXLPipeline
 
     device, dtype = _get_device_and_dtype()
@@ -52,14 +59,43 @@ def _load_base_pipeline(hf_token: str = ""):
     _pipeline = StableDiffusionXLPipeline.from_pretrained(
         SDXL_BASE.repo_id, revision=SDXL_BASE.revision, **kwargs
     )
-    _pipeline.to(device)
 
-    # Enable memory optimizations
     if device == "cuda":
+        # xformers cuts VRAM further when available; optional so no hard failure
         try:
             _pipeline.enable_xformers_memory_efficient_attention()
         except Exception:
-            pass  # xformers optional
+            pass
+
+        # Determine whether we have enough VRAM for a full GPU load.
+        # SDXL fp16 needs ~8-10 GB; anything below that gets CPU offload.
+        try:
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        except Exception:
+            vram_gb = 999.0  # can't detect — assume plenty and try full load
+
+        if vram_gb < 10.0:
+            log.info(
+                "VRAM %.1f GB < 10 GB — enabling sequential CPU offload for SDXL "
+                "(generation will be slower but stable on this GPU)",
+                vram_gb,
+            )
+            _pipeline.enable_model_cpu_offload()
+        else:
+            try:
+                _pipeline.to(device)
+            except RuntimeError as exc:
+                if "out of memory" in str(exc).lower():
+                    log.warning(
+                        "GPU OOM while loading SDXL; falling back to CPU offload. "
+                        "Close other GPU applications to recover full speed."
+                    )
+                    torch.cuda.empty_cache()
+                    _pipeline.enable_model_cpu_offload()
+                else:
+                    raise
+    else:
+        _pipeline.to(device)
 
     log.info("SDXL pipeline loaded.")
 
@@ -172,8 +208,23 @@ def generate_dataset(
 
     try:
         _load_ip_adapter(hf_token)
-        # FaceID Plus V2 uses ArcFace embeddings, not a raw PIL image
-        face_embedding = _extract_face_embedding(reference_image)
+
+        # IP-Adapter FaceID Plus V2 needs two inputs:
+        #   1. ip_adapter_image_embeds — ArcFace embedding, shape (1, 1, 512).
+        #      InsightFace returns a (512,) numpy array; we unsqueeze twice to
+        #      add the batch and num-images dimensions the pipeline expects.
+        #   2. ip_adapter_image — PIL face image consumed by the CLIP image
+        #      encoder in the "Plus V2" component for style/appearance guidance.
+        # Passing only the raw (512,) array (the previous behaviour) silently
+        # skipped the CLIP component and produced weaker identity preservation.
+        import numpy as np
+        import torch
+
+        raw_embedding = _extract_face_embedding(reference_image)  # (512,) numpy
+        face_id_embeds = torch.from_numpy(
+            raw_embedding[np.newaxis, np.newaxis, :]  # → (1, 1, 512)
+        )
+        face_image = _prepare_face_image(reference_image)  # PIL image for CLIP
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
@@ -185,14 +236,14 @@ def generate_dataset(
                 progress_cb(i, total, f"Generating {i + 1}/{total}: {label}")
 
             seed = random.randint(0, 2**32 - 1)
-            import torch
             generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
 
             try:
                 result = _pipeline(
                     prompt=full_prompt,
                     negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image_embeds=[face_embedding],
+                    ip_adapter_image=face_image,             # CLIP appearance component
+                    ip_adapter_image_embeds=[face_id_embeds],  # ArcFace identity component
                     num_inference_steps=20,
                     guidance_scale=4.0,
                     width=832,
