@@ -203,6 +203,9 @@ async def generate_dataset_images(
         all_prompts = json.load(f)
     prompts = [p["prompt"] for p in all_prompts[:count]]
 
+    if not _gpu_lock.acquire(blocking=False):
+        raise HTTPException(409, "GPU is busy. Wait for the current task to finish.")
+
     q      = SSEQueue()
     cancel = threading.Event()
     with _cancel_lock:
@@ -228,6 +231,8 @@ async def generate_dataset_images(
             q.put({"type": "done", "message": "Dataset generation complete."})
         except Exception as exc:
             q.put({"type": "error", "message": str(exc)})
+        finally:
+            _gpu_lock.release()
 
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
@@ -359,7 +364,7 @@ async def start_training(
     slug:       str,
     hf_token:   str = Query(""),
     steps:      int = Query(2000),
-    rank:       int = Query(16),
+    rank:       int = Query(32),
     lr:         str = Query("1e-4"),
     base_model: str = Query("sdxl"),
 ):

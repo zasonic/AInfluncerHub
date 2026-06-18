@@ -209,7 +209,7 @@ def generate_video(
         from diffusers.utils import export_to_video
 
         out_path = output_dir / f"video_{image_path.stem}_{seed}.mp4"
-        export_to_video(result.frames[0], str(out_path), fps=16)
+        export_to_video(result.frames[0], str(out_path), fps=24)
 
         if progress_cb:
             progress_cb("Video created successfully.")
