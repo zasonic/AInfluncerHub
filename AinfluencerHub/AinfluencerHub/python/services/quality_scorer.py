@@ -82,8 +82,10 @@ def score_images(
     return results
 
 
-# Identity similarity threshold — images below this are flagged as not matching the reference
-IDENTITY_THRESHOLD = 0.35
+# Identity similarity threshold — images below this are flagged as not matching the reference.
+# ArcFace cosine similarity for genuinely same-person matches is typically 0.45+;
+# 0.35 was too permissive and allowed weakly-similar images into training data.
+IDENTITY_THRESHOLD = 0.45
 
 
 def score_identity_similarity(

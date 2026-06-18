@@ -29,7 +29,7 @@ class SettingsModel(BaseModel):
     hf_token:        str                              = ""
     dataset_method:  Literal["local", "manual"]       = "local"
     training_steps:  int                              = Field(2000, ge=100, le=20_000)
-    lora_rank:       int                              = Field(16, ge=2, le=256)
+    lora_rank:       int                              = Field(32, ge=2, le=256)
     learning_rate:   str                              = "1e-4"
     preferred_model: str                              = "sdxl"
     video_model:     Literal["wan2.1", "cogvideo", "ltx"] = "wan2.1"
