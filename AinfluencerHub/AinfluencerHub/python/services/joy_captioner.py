@@ -22,12 +22,19 @@ _device = None
 
 JOYCAPTION_MODEL_ID = JOY_CAPTIONER.repo_id
 
-# System prompt for training-style captions
+# Face-identity-specific caption prompt for LoRA training.
+# Elicits precise facial feature vocabulary so the LoRA learns a consistent
+# face identity rather than generic appearance. Research shows detailed captions
+# with specific feature vocabulary significantly improve subject fidelity
+# (Liu et al., ICLR 2024; JoyCaption beta-one face-specific prompting).
 CAPTION_PROMPT = (
-    "Write a detailed description of this image for use as a training caption "
-    "for an AI image generation model. Describe the person's appearance, pose, "
-    "expression, clothing, and the setting. Be specific and use natural language. "
-    "Do not start with 'The image shows' or 'This is'. Just describe what you see."
+    "Write a detailed training caption for an AI image generation model. "
+    "Describe the person's exact facial features (face shape, eye color and shape, "
+    "skin tone, nose shape, lip shape, eyebrow arch), hairstyle and color, "
+    "pose, expression, clothing details, lighting direction, and background setting. "
+    "Use specific, concrete adjectives. Do not begin with 'The image shows' or "
+    "'This is a photo of'. Start directly with the description. "
+    "Precision matters — this caption will be used to train a face identity LoRA."
 )
 
 

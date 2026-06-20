@@ -27,6 +27,17 @@ v2.2 FLUX training improvements:
   Velocity target — FLUX uses FlowMatchEulerDiscreteScheduler (rectified
             flow), so the correct training objective is to predict the
             velocity field (noise - latents), not the epsilon noise.
+
+v2.3 SDXL optimizer + timestep improvements:
+  Prodigy  — Self-tuning optimizer (Mishchenko & Malitsky 2023). Eliminates
+            manual learning rate tuning — non-technical users get good results
+            without knowing what a learning rate is. safeguard_warmup=True
+            handles warmup internally; cosine scheduler is bypassed when
+            Prodigy is active. Falls back to AdamW8bit → AdamW.
+  Logit-normal timesteps for SDXL — Same Esser et al. 2024 technique now
+            applied to the SDXL path. Concentrates training on intermediate
+            timesteps where face structure is learned vs. uniform sampling.
+            Falls back to uniform on any error; MinSNR-γ still applies.
 """
 
 import logging
@@ -109,7 +120,7 @@ def run_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.float16 if device == "cuda" else torch.float32
 
-    # ── Step 1: Collect image-caption pairs ──────────────────────────────────────────────────
+    # ── Step 1: Collect image-caption pairs ────────────────────────────────────────────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -128,7 +139,7 @@ def run_training(
 
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Step 2: Load model components ──────────────────────────────────────────────────
+    # ── Step 2: Load model components ────────────────────────────────────────────────────────────────────────────────────────
 
     _emit("Loading SDXL model components (this may download ~6.5 GB on first run)...")
 
@@ -172,7 +183,7 @@ def run_training(
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # ── Step 3: Apply LoRA to UNet ────────────────────────────────────────────────────
+    # ── Step 3: Apply LoRA to UNet ────────────────────────────────────────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -207,7 +218,7 @@ def run_training(
     # Enable gradient checkpointing
     unet.enable_gradient_checkpointing()
 
-    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────────
+    # ── Step 4: Build dataset & dataloader ───────────────────────────────────────────────────────────────────────────────────────
 
     class CaptionImageDataset(Dataset):
         def __init__(self, pairs, tokenizer_1, tokenizer_2, resolution=1024):
@@ -250,30 +261,50 @@ def run_training(
         dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True,
     )
 
-    # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────────
+    # ── Step 5: Optimizer & scheduler ─────────────────────────────────────────────────────────────────────────────────────
 
+    # Prodigy (Mishchenko & Malitsky 2023): self-tuning optimizer that estimates
+    # its own learning rate. Non-technical users get good results without knowing
+    # what a learning rate is. safeguard_warmup=True handles warmup internally
+    # so we skip the cosine scheduler and linear warmup when Prodigy is active.
+    _using_prodigy = False
     try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(
+        from prodigyopt import Prodigy
+        optimizer = Prodigy(
             unet.parameters(),
-            lr=learning_rate,
+            lr=1.0,
             weight_decay=1e-2,
+            use_bias_correction=True,
+            safeguard_warmup=True,
         )
-        _emit("Using AdamW8bit optimizer.")
+        _using_prodigy = True
+        _emit("Using Prodigy optimizer (self-tuning LR — no manual tuning needed).")
     except ImportError:
-        optimizer = torch.optim.AdamW(
-            unet.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-2,
-        )
-        _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using AdamW8bit optimizer (install prodigyopt for self-tuning LR).")
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using standard AdamW optimizer.")
 
-    # Cosine LR scheduler with warmup
+    # Cosine LR scheduler with warmup — bypassed when Prodigy manages its own LR
     warmup_steps = max(50, steps // 20)
-    from torch.optim.lr_scheduler import CosineAnnealingLR
-    scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    if not _using_prodigy:
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    else:
+        scheduler = None
 
-    # ── Step 6: Training loop ───────────────────────────────────────────────────────────
+    # ── Step 6: Training loop ──────────────────────────────────────────────────────────────────────────────────────────────
 
     _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
 
@@ -281,6 +312,10 @@ def run_training(
     _alphas_cumprod_dev = noise_scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)
     _snr_gamma = 5.0  # published optimal default (Hang et al. 2023)
     _emit(f"Loss: MinSNR-γ weighted (gamma={_snr_gamma}) — balances timestep contributions")
+    _emit(
+        "Timestep sampling: logit-normal (Esser et al. 2024) — "
+        "concentrates training on informative intermediate timesteps"
+    )
 
     gradient_accumulation_steps = 4
     global_step = 0
@@ -324,10 +359,21 @@ def run_training(
 
         # Add noise
         noise = torch.randn_like(latents)
-        timesteps = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps,
-            (latents.shape[0],), device=device,
-        ).long()
+        # Logit-normal timestep sampling (Esser et al. 2024, SD3/FLUX paper).
+        # Draws u ~ N(0,1), maps to (0,1) via sigmoid, concentrating mass on
+        # intermediate timesteps where face structure is learned. Falls back to
+        # uniform when any tensor error occurs so training is never interrupted.
+        try:
+            u = torch.randn(latents.shape[0])
+            t_frac = torch.sigmoid(u).to(device)
+            timesteps = (
+                t_frac * noise_scheduler.config.num_train_timesteps
+            ).long().clamp(0, noise_scheduler.config.num_train_timesteps - 1)
+        except Exception:
+            timesteps = torch.randint(
+                0, noise_scheduler.config.num_train_timesteps,
+                (latents.shape[0],), device=device,
+            ).long()
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
         # Time IDs for SDXL (original_size + crop_coords + target_size)
@@ -377,12 +423,14 @@ def run_training(
         if global_step % gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(unet.parameters(), 1.0)
             optimizer.step()
-            if global_step > warmup_steps:
+            # Prodigy handles its own LR schedule via safeguard_warmup;
+            # only advance the cosine scheduler when using AdamW-style optimizers.
+            if not _using_prodigy and scheduler is not None and global_step > warmup_steps:
                 scheduler.step()
             optimizer.zero_grad()
 
-        # Warmup (linear)
-        if global_step <= warmup_steps:
+        # Linear warmup — Prodigy uses safeguard_warmup internally, skip for it
+        if not _using_prodigy and global_step <= warmup_steps:
             warmup_lr = learning_rate * (global_step / warmup_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
@@ -391,8 +439,13 @@ def run_training(
         if global_step % 10 == 0 or global_step == 1:
             avg_loss = running_loss / 10 if global_step > 10 else running_loss
             running_loss = 0.0
-            current_lr = optimizer.param_groups[0]["lr"]
-            _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
+            if _using_prodigy:
+                # Prodigy tracks its own scale parameter 'd' (estimated step size)
+                d_val = optimizer.param_groups[0].get("d", optimizer.param_groups[0]["lr"])
+                _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  prodigy-d: {d_val:.2e}")
+            else:
+                current_lr = optimizer.param_groups[0]["lr"]
+                _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
 
         # Save checkpoint
         if global_step % save_every == 0 and global_step < steps:
@@ -401,7 +454,7 @@ def run_training(
             unet.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Step 7: Save final LoRA ───────────────────────────────────────────────────────────────
+    # ── Step 7: Save final LoRA ─────────────────────────────────────────────────────────────────────────────────────────────────
 
     _emit("Saving final LoRA weights...")
     final_path = output_dir / f"lora_rank{rank}_steps{steps}"
@@ -466,7 +519,7 @@ def _run_flux_training(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-    # ── Collect dataset ──────────────────────────────────────────────────────────────────
+    # ── Collect dataset ──────────────────────────────────────────────────────────────────────────────────────────
 
     _emit("Collecting dataset...")
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -484,7 +537,7 @@ def _run_flux_training(
         return False, f"No image-caption pairs found in {dataset_dir}"
     _emit(f"Found {len(pairs)} image-caption pairs.")
 
-    # ── Load model components ───────────────────────────────────────────────────────────────
+    # ── Load model components ───────────────────────────────────────────────────────────────────────────────────────────
 
     _emit("Loading FLUX.1-dev components (first run downloads ~23 GB)...")
 
@@ -543,7 +596,7 @@ def _run_flux_training(
     vae.requires_grad_(False)
     transformer.requires_grad_(False)
 
-    # ── Apply LoRA to FLUX transformer ───────────────────────────────────────────────
+    # ── Apply LoRA to FLUX transformer ────────────────────────────────────────────────────────────────────────
 
     from peft import LoraConfig, get_peft_model
 
@@ -567,7 +620,7 @@ def _run_flux_training(
     )
     transformer.enable_gradient_checkpointing()
 
-    # ── Dataset ────────────────────────────────────────────────────────────────────────
+    # ── Dataset ───────────────────────────────────────────────────────────────────────────────────────────────────
 
     class FluxDataset(Dataset):
         def __init__(self, pairs: list[tuple[Path, str]], resolution: int = 1024):
@@ -604,7 +657,7 @@ def _run_flux_training(
         FluxDataset(pairs), batch_size=1, shuffle=True, num_workers=0,
     )
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────────────
+    # ── Optimizer ────────────────────────────────────────────────────────────────────────────────────────────────
 
     try:
         from bitsandbytes.optim import AdamW8bit
@@ -620,7 +673,7 @@ def _run_flux_training(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
-    # ── Training loop ─────────────────────────────────────────────────────────────────────
+    # ── Training loop ───────────────────────────────────────────────────────────────────────────────────────────────────
 
     _emit(f"Starting FLUX LoRA training: {steps} steps, rank {rank}, lr {learning_rate}")
     _emit(
@@ -722,7 +775,7 @@ def _run_flux_training(
             transformer.save_pretrained(ckpt_path)
             _emit(f"Checkpoint saved: {ckpt_path}")
 
-    # ── Save final LoRA ────────────────────────────────────────────────────────────────────
+    # ── Save final LoRA ───────────────────────────────────────────────────────────────────────────────────────────────────
 
     _emit("Saving final FLUX LoRA weights...")
     try:
