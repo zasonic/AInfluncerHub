@@ -27,6 +27,13 @@ v2.2 FLUX training improvements:
   Velocity target — FLUX uses FlowMatchEulerDiscreteScheduler (rectified
             flow), so the correct training objective is to predict the
             velocity field (noise - latents), not the epsilon noise.
+
+v2.3 rank-stability improvements:
+  rsLoRA  — Rank-Stabilized LoRA (Kalajdzievski 2023, arXiv:2312.03732).
+            Normalises the LoRA scaling factor as α/√r instead of α/r,
+            preventing adapter suppression at higher ranks (≥16) and improving
+            gradient stability. Requires peft >= 0.8.2. Applied to both SDXL
+            (alongside DoRA) and FLUX. Falls back gracefully via TypeError.
 """
 
 import logging
@@ -189,13 +196,15 @@ def run_training(
 
     # DoRA (Liu et al., ICLR 2024): decomposes LoRA updates into magnitude +
     # direction components, improving gradient flow and face-identity sharpness.
-    # Requires peft >= 0.9.0; older installs fall back to standard LoRA.
+    # rsLoRA (Kalajdzievski 2023): normalises LoRA scaling by 1/√r instead of 1/r,
+    # preventing adapter suppression at higher ranks and improving gradient stability.
+    # Both require peft >= 0.9.0; older installs fall back to standard LoRA.
     try:
-        lora_config = LoraConfig(**_lora_base_kwargs, use_dora=True)
-        _emit("LoRA adapter: DoRA enabled (Weight-Decomposed, peft>=0.9.0) — improved identity consistency")
+        lora_config = LoraConfig(**_lora_base_kwargs, use_dora=True, use_rslora=True)
+        _emit("LoRA adapter: DoRA + rsLoRA enabled (peft>=0.9.0) — improved identity consistency and rank stability")
     except TypeError:
         lora_config = LoraConfig(**_lora_base_kwargs)
-        _emit("LoRA adapter: standard LoRA (upgrade peft>=0.9.0 to enable DoRA for better results)")
+        _emit("LoRA adapter: standard LoRA (upgrade peft>=0.9.0 to enable DoRA + rsLoRA for better results)")
 
     unet = get_peft_model(unet, lora_config)
     unet.train()
@@ -547,15 +556,32 @@ def _run_flux_training(
 
     from peft import LoraConfig, get_peft_model
 
-    lora_config = LoraConfig(
-        r=rank,
-        lora_alpha=rank,
-        init_lora_weights="gaussian",
-        target_modules=[
-            "to_k", "to_q", "to_v", "to_out",
-            "add_k_proj", "add_q_proj", "add_v_proj", "add_out_proj",
-        ],
-    )
+    # rsLoRA (Kalajdzievski 2023): normalises LoRA scaling by 1/√r instead of 1/r,
+    # which prevents adapter suppression at higher ranks and is especially beneficial
+    # for FLUX's DiT architecture. Requires peft >= 0.8.2; falls back to standard LoRA.
+    try:
+        lora_config = LoraConfig(
+            r=rank,
+            lora_alpha=rank,
+            init_lora_weights="gaussian",
+            use_rslora=True,
+            target_modules=[
+                "to_k", "to_q", "to_v", "to_out",
+                "add_k_proj", "add_q_proj", "add_v_proj", "add_out_proj",
+            ],
+        )
+        _emit("LoRA adapter: rsLoRA enabled (peft>=0.8.2) — improved rank stability for FLUX")
+    except TypeError:
+        lora_config = LoraConfig(
+            r=rank,
+            lora_alpha=rank,
+            init_lora_weights="gaussian",
+            target_modules=[
+                "to_k", "to_q", "to_v", "to_out",
+                "add_k_proj", "add_q_proj", "add_v_proj", "add_out_proj",
+            ],
+        )
+        _emit("LoRA adapter: standard LoRA (upgrade peft>=0.8.2 to enable rsLoRA for better rank stability)")
     transformer = get_peft_model(transformer, lora_config)
     transformer.train()
 
