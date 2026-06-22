@@ -178,29 +178,38 @@ def generate_video(
             seed = random.randint(0, 2**32 - 1)
         generator = torch.Generator(device="cpu").manual_seed(seed)
 
-        if progress_cb:
-            progress_cb("Generating video... this may take several minutes.")
+        # Step-level progress callback — falls back gracefully if the pipeline
+        # does not accept callback_on_step_end (older diffusers versions).
+        completed = [0]
 
-        if _pipeline_type == "ltx":
-            result = _pipeline(
-                image=source,
-                prompt=prompt,
-                negative_prompt="worst quality, inconsistent motion, blurry, jittery",
-                num_frames=num_frames,
-                num_inference_steps=steps,
-                guidance_scale=cfg,
-                generator=generator,
-            )
-        else:
-            result = _pipeline(
-                image=source,
-                prompt=prompt,
-                negative_prompt="",
-                num_frames=num_frames,
-                num_inference_steps=steps,
-                guidance_scale=cfg,
-                generator=generator,
-            )
+        def _step_cb(pipe, step_index, timestep, callback_kwargs):
+            completed[0] = step_index + 1
+            pct = int(100 * completed[0] / steps)
+            if progress_cb:
+                progress_cb(
+                    f"Generating video... {pct}% ({completed[0]}/{steps} steps)"
+                )
+            return callback_kwargs
+
+        neg = "worst quality, inconsistent motion, blurry, jittery" if _pipeline_type == "ltx" else ""
+        gen_kwargs: dict = {
+            "image": source,
+            "prompt": prompt,
+            "negative_prompt": neg,
+            "num_frames": num_frames,
+            "num_inference_steps": steps,
+            "guidance_scale": cfg,
+            "generator": generator,
+        }
+
+        if progress_cb:
+            progress_cb("Generating video...")
+
+        try:
+            result = _pipeline(**gen_kwargs, callback_on_step_end=_step_cb)
+        except TypeError:
+            # Pipeline does not support callback_on_step_end — run without it.
+            result = _pipeline(**gen_kwargs)
 
         # Export frames to video
         if progress_cb:

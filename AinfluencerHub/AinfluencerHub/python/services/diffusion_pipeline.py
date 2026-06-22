@@ -102,22 +102,54 @@ def _get_face_app():
     return _face_app
 
 
-def _extract_face_embedding(image_path: Path):
-    """Extract face embedding from a reference image."""
+def _extract_averaged_face_embeddings(image_paths: list[Path]):
+    """
+    Extract ArcFace embeddings from multiple reference photos and return their
+    normalised mean.  Using multiple photos gives the IP-Adapter a more stable
+    face prior, reducing variance across generated images.
+
+    Silently skips photos where no face can be detected and raises ValueError
+    only when every photo fails — so a single bad upload cannot block the run.
+    """
     import cv2
+    import numpy as np
 
     app = _get_face_app()
-    img = cv2.imread(str(image_path))
-    if img is None:
-        raise ValueError(f"Could not read image: {image_path}")
+    embeddings = []
 
-    faces = app.get(img)
-    if not faces:
-        raise ValueError(f"No face detected in {image_path.name}")
+    for img_path in image_paths:
+        try:
+            img = cv2.imread(str(img_path))
+            if img is None:
+                log.warning("Could not read image: %s", img_path.name)
+                continue
+            faces = app.get(img)
+            if not faces:
+                log.warning("No face detected in %s — skipping", img_path.name)
+                continue
+            # Use the largest detected face
+            face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+            embeddings.append(face.normed_embedding)
+        except Exception as exc:
+            log.warning("Face extraction failed for %s: %s", img_path.name, exc)
 
-    # Use the largest face
-    face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-    return face.normed_embedding
+    if not embeddings:
+        raise ValueError(
+            f"No face detected in any of the {len(image_paths)} reference photo(s). "
+            "Please upload a clear, front-facing photo."
+        )
+
+    if len(embeddings) == 1:
+        return embeddings[0]
+
+    # Average the normalised embeddings and re-normalise so the IP-Adapter
+    # receives a unit vector regardless of how many photos were used.
+    avg = np.mean(embeddings, axis=0)
+    norm = float(np.linalg.norm(avg))
+    if norm > 0:
+        avg = avg / norm
+    log.info("Averaged %d face embedding(s) for IP-Adapter.", len(embeddings))
+    return avg
 
 
 def _prepare_face_image(image_path: Path):
@@ -152,7 +184,7 @@ def unload() -> None:
 
 
 def generate_dataset(
-    reference_image: Path,
+    reference_images: list[Path],
     prompts: list[str],
     trigger_word: str,
     output_dir: Path,
@@ -163,8 +195,8 @@ def generate_dataset(
     """
     Generate face-consistent dataset images using IP-Adapter.
 
-    Uses the reference image's face to guide generation, producing varied
-    poses and settings while maintaining face identity.
+    Accepts one or more reference photos; embeddings are averaged so every
+    uploaded photo contributes to the face identity.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
@@ -172,8 +204,8 @@ def generate_dataset(
 
     try:
         _load_ip_adapter(hf_token)
-        # FaceID Plus V2 uses ArcFace embeddings, not a raw PIL image
-        face_embedding = _extract_face_embedding(reference_image)
+        # Average ArcFace embeddings across all reference photos
+        face_embedding = _extract_averaged_face_embeddings(reference_images)
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():

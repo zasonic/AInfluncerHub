@@ -99,6 +99,16 @@ def _drain_queue(q: SSEQueue) -> AsyncGenerator[dict, None]:
     """Legacy-compatible alias so existing callers keep working."""
     return q.drain()
 
+
+def _oom_message(exc: Exception) -> str | None:
+    """Return a friendly GPU memory message, or None if not an OOM error."""
+    if "out of memory" in str(exc).lower():
+        return (
+            "Not enough GPU memory. Close other applications using your GPU "
+            "and try again. If the problem persists, choose a smaller model."
+        )
+    return None
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -216,7 +226,7 @@ async def generate_dataset_images(
             from services.diffusion_pipeline import generate_dataset
             hf_token = settings.get("hf_token", "")
             generate_dataset(
-                reference_image=refs[0],
+                reference_images=refs,
                 prompts=prompts,
                 trigger_word=proj.trigger_word,
                 output_dir=proj.dataset_dir,
@@ -230,7 +240,7 @@ async def generate_dataset_images(
             proj.save()
             q.put({"type": "done", "message": "Dataset generation complete."})
         except Exception as exc:
-            q.put({"type": "error", "message": str(exc)})
+            q.put({"type": "error", "message": _oom_message(exc) or str(exc)})
         finally:
             _gpu_lock.release()
 
@@ -350,7 +360,7 @@ async def run_captioning(
             )
             q.put({"type": "done", "message": "Captioning complete."})
         except Exception as exc:
-            q.put({"type": "error", "message": str(exc)})
+            q.put({"type": "error", "message": _oom_message(exc) or str(exc)})
         finally:
             _gpu_lock.release()
 
@@ -423,7 +433,7 @@ async def start_training(
             else:
                 q.put({"type": "error", "message": message})
         except Exception as exc:
-            q.put({"type": "error", "message": str(exc)})
+            q.put({"type": "error", "message": _oom_message(exc) or str(exc)})
         finally:
             _gpu_lock.release()
 
@@ -505,7 +515,7 @@ async def generate_image(
             )
             q.put({"type": "done", "message": "Image generated.", "payload": {"paths": [str(p) for p in paths]}})
         except Exception as exc:
-            q.put({"type": "error", "message": str(exc)})
+            q.put({"type": "error", "message": _oom_message(exc) or str(exc)})
         finally:
             _gpu_lock.release()
 
@@ -567,7 +577,7 @@ async def animate_image(
             q.put({"type": "done", "message": "Video created.",
                    "payload": {"path": str(video) if video else ""}})
         except Exception as exc:
-            q.put({"type": "error", "message": str(exc)})
+            q.put({"type": "error", "message": _oom_message(exc) or str(exc)})
         finally:
             _gpu_lock.release()
 
