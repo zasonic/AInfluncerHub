@@ -3,7 +3,7 @@ services/diffusion_pipeline.py — Native image generation using HuggingFace dif
 
 Replaces ComfyUI for all image generation:
   - Face-consistent dataset generation via IP-Adapter-FaceID
-  - Text-to-image with trained LoRA weights
+  - Text-to-image with trained LoRA weights (SDXL and FLUX)
   - Model management (auto-download, VRAM-aware loading/unloading)
 
 All operations run locally on the user's GPU without external services.
@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import FLUX_BASE, IP_ADAPTER, SDXL_BASE
 
 log = logging.getLogger("hub.diffusion")
 
@@ -23,6 +23,7 @@ log = logging.getLogger("hub.diffusion")
 _pipeline = None
 _ip_adapter_loaded = False
 _face_app = None
+_flux_pipeline = None
 
 
 def _get_device_and_dtype():
@@ -62,6 +63,33 @@ def _load_base_pipeline(hf_token: str = ""):
             pass  # xformers optional
 
     log.info("SDXL pipeline loaded.")
+
+
+def _load_flux_pipeline(hf_token: str = "") -> None:
+    """Load the FLUX.1-dev pipeline with CPU offload on CUDA."""
+    global _flux_pipeline
+    if _flux_pipeline is not None:
+        return
+
+    from diffusers import FluxPipeline
+    import torch
+
+    device, _ = _get_device_and_dtype()
+    log.info("Loading FLUX.1-dev pipeline on %s ...", device)
+
+    kwargs: dict = {"torch_dtype": torch.bfloat16}
+    if hf_token:
+        kwargs["token"] = hf_token
+
+    _flux_pipeline = FluxPipeline.from_pretrained(FLUX_BASE.repo_id, **kwargs)
+
+    if device == "cuda":
+        # FLUX is 23 GB; enable_model_cpu_offload keeps it within 16 GB VRAM
+        _flux_pipeline.enable_model_cpu_offload()
+    else:
+        _flux_pipeline.to(device)
+
+    log.info("FLUX pipeline loaded.")
 
 
 def _load_ip_adapter(hf_token: str = ""):
@@ -128,6 +156,15 @@ def _prepare_face_image(image_path: Path):
     return img
 
 
+def _unload_flux() -> None:
+    """Release FLUX pipeline GPU memory."""
+    global _flux_pipeline
+    if _flux_pipeline is not None:
+        del _flux_pipeline
+        _flux_pipeline = None
+    log.info("FLUX pipeline unloaded.")
+
+
 def unload() -> None:
     """Release all GPU memory."""
     global _pipeline, _ip_adapter_loaded, _face_app
@@ -141,6 +178,8 @@ def unload() -> None:
         del _face_app
         _face_app = None
 
+    _unload_flux()
+
     import torch
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -148,7 +187,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────────
 
 
 def generate_dataset(
@@ -295,3 +334,83 @@ def generate_image(
             except Exception:
                 pass
         unload()
+
+
+def generate_image_flux(
+    positive_prompt: str,
+    lora_path: str = "",
+    lora_strength: float = 0.85,
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 20,
+    cfg: float = 3.5,
+    seed: int = -1,
+    output_dir: Path | None = None,
+    hf_token: str = "",
+    progress_cb: Callable[[str], None] | None = None,
+) -> list[Path]:
+    """
+    Generate an image using FLUX.1-dev with optional LoRA.
+    Returns list of output file paths.
+
+    FLUX uses bfloat16 and CPU offload so it fits within 16 GB VRAM.
+    guidance_scale default is 3.5 (FLUX optimal; SDXL uses ~4-7).
+    """
+    import torch
+
+    if output_dir is None:
+        output_dir = Path("output") / "generated"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _load_flux_pipeline(hf_token)
+
+        if progress_cb:
+            progress_cb("Loading FLUX pipeline...")
+
+        if lora_path and Path(lora_path).exists():
+            if progress_cb:
+                progress_cb("Loading FLUX LoRA weights...")
+            _flux_pipeline.load_lora_weights(lora_path, adapter_name="user_lora")
+            _flux_pipeline.set_adapters(["user_lora"], adapter_weights=[lora_strength])
+            log.info("FLUX LoRA loaded: %s (strength=%.2f)", lora_path, lora_strength)
+
+        if seed < 0:
+            seed = random.randint(0, 2**32 - 1)
+
+        generator = torch.Generator().manual_seed(seed)
+
+        if progress_cb:
+            progress_cb("Generating image with FLUX...")
+
+        result = _flux_pipeline(
+            prompt=positive_prompt,
+            num_inference_steps=steps,
+            guidance_scale=cfg,
+            width=width,
+            height=height,
+            generator=generator,
+            max_sequence_length=512,
+        )
+
+        paths: list[Path] = []
+        for idx, image in enumerate(result.images):
+            out_path = output_dir / f"flux_{seed}_{idx}.png"
+            image.save(out_path)
+            paths.append(out_path)
+
+        if progress_cb:
+            progress_cb(f"Generated {len(paths)} image(s) with FLUX.")
+
+        return paths
+
+    finally:
+        if lora_path and _flux_pipeline is not None:
+            try:
+                _flux_pipeline.unload_lora_weights()
+            except Exception:
+                pass
+        _unload_flux()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
