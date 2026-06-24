@@ -148,7 +148,7 @@ def unload() -> None:
     log.info("Diffusion pipeline unloaded.")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# -- Public API ---------------------------------------------------------------
 
 
 def generate_dataset(
@@ -169,6 +169,11 @@ def generate_dataset(
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(prompts)
     paths: list[Path] = []
+
+    # Release any cached inference pipeline before loading IP-Adapter to
+    # avoid VRAM overflow on 16 GB cards (base SDXL + IP-Adapter exceeds
+    # the available headroom if a warm pipeline is already resident).
+    unload()
 
     try:
         _load_ip_adapter(hf_token)
@@ -234,6 +239,11 @@ def generate_image(
     """
     Generate an image using SDXL with optional LoRA.
     Returns list of output file paths.
+
+    The base SDXL pipeline is kept warm in VRAM after a successful generation
+    so that back-to-back studio calls skip the 30-60 s disk reload. On any
+    error the pipeline is freed immediately. generate_dataset() and the
+    training/video routes call unload() before they start their own GPU work.
     """
     import torch
 
@@ -287,11 +297,17 @@ def generate_image(
 
         return paths
 
+    except Exception:
+        # On failure, free VRAM immediately so the user can retry.
+        unload()
+        raise
+
     finally:
-        # Unload LoRA weights to avoid contaminating next generation
+        # Unload only LoRA weights to avoid contaminating the next generation.
+        # The base pipeline stays warm — generate_dataset() and the training
+        # and video routes call unload() before they start their own GPU work.
         if lora_path and _pipeline is not None:
             try:
                 _pipeline.unload_lora_weights()
             except Exception:
                 pass
-        unload()

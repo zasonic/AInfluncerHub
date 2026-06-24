@@ -43,7 +43,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("hub.server")
 
-# ── Global singletons ─────────────────────────────────────────────────────────
+# -- Global singletons --------------------------------------------------------
 
 settings = Settings()
 
@@ -54,7 +54,7 @@ _gpu_lock = threading.Lock()
 _cancel_lock = threading.Lock()
 _cancel_events: dict[str, threading.Event] = {}
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
+# -- FastAPI app --------------------------------------------------------------
 
 app = FastAPI(title="AinfluencerHub", version="2.0.0")
 app.add_middleware(
@@ -64,7 +64,7 @@ app.add_middleware(
     allow_headers  = ["*"],
 )
 
-# ── SSE helpers ───────────────────────────────────────────────────────────────
+# -- SSE helpers --------------------------------------------------------------
 
 def _sse_event(data: dict) -> dict:
     return {"data": json.dumps(data)}
@@ -99,20 +99,20 @@ def _drain_queue(q: SSEQueue) -> AsyncGenerator[dict, None]:
     """Legacy-compatible alias so existing callers keep working."""
     return q.drain()
 
-# ── Health ────────────────────────────────────────────────────────────────────
+# -- Health -------------------------------------------------------------------
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# ── Preflight ─────────────────────────────────────────────────────────────────
+# -- Preflight ----------------------------------------------------------------
 
 @app.get("/api/preflight")
 def preflight():
     from services.preflight import run_all
     return run_all(settings)
 
-# ── Projects ──────────────────────────────────────────────────────────────────
+# -- Projects -----------------------------------------------------------------
 
 @app.get("/api/projects")
 def list_projects():
@@ -159,7 +159,7 @@ async def upload_references(slug: str, files: list[UploadFile] = File(...)):
         count += 1
     return {"count": count}
 
-# ── Dataset ───────────────────────────────────────────────────────────────────
+# -- Dataset ------------------------------------------------------------------
 
 @app.get("/api/dataset/{slug}/images")
 def get_dataset_images(slug: str):
@@ -265,7 +265,7 @@ def score_dataset_identity(slug: str):
     passed = [r for r in results if r["passed"]]
     return {"scores": results, "passed": len(passed), "total": len(results)}
 
-# ── Captions ──────────────────────────────────────────────────────────────────
+# -- Captions -----------------------------------------------------------------
 
 @app.get("/api/captions/{slug}")
 def get_captions(slug: str):
@@ -357,7 +357,7 @@ async def run_captioning(
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
 
-# ── Training ──────────────────────────────────────────────────────────────────
+# -- Training -----------------------------------------------------------------
 
 @app.get("/api/training/{slug}/start")
 async def start_training(
@@ -374,6 +374,12 @@ async def start_training(
         raise HTTPException(400, "hf_token is required.")
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy. Wait for the current task to finish.")
+
+    # Free any warm inference pipeline before training loads its own model
+    # weights — SDXL (~6.5 GB) and FLUX (~23 GB) won't fit alongside a
+    # cached inference pipeline on a 16 GB card.
+    from services import diffusion_pipeline as _dp
+    _dp.unload()
 
     q      = SSEQueue()
     cancel = threading.Event()
@@ -439,7 +445,7 @@ def cancel_training(slug: str):
         ev.set()
     return {"ok": True}
 
-# ── Model management ─────────────────────────────────────────────────────────
+# -- Model management ---------------------------------------------------------
 
 @app.get("/api/models/status")
 def get_model_status():
@@ -472,7 +478,7 @@ async def download_model(model_hf_id: str = Query("")):
     threading.Thread(target=_run, daemon=True).start()
     return EventSourceResponse(_drain_queue(q))
 
-# ── Studio — image generation ─────────────────────────────────────────────────
+# -- Studio — image generation ------------------------------------------------
 
 @app.get("/api/studio/{slug}/generate")
 async def generate_image(
@@ -533,7 +539,7 @@ def get_generated_images(slug: str):
         ]
     }
 
-# ── Studio — video ────────────────────────────────────────────────────────────
+# -- Studio — video -----------------------------------------------------------
 
 @app.get("/api/studio/{slug}/animate")
 async def animate_image(
@@ -547,6 +553,11 @@ async def animate_image(
         raise HTTPException(400, "image_path is required.")
     if not _gpu_lock.acquire(blocking=False):
         raise HTTPException(409, "GPU is busy.")
+
+    # Free any warm inference pipeline before the video pipeline loads —
+    # SVD (~10 GB) won't fit alongside a cached SDXL pipeline on 16 GB VRAM.
+    from services import diffusion_pipeline as _dp
+    _dp.unload()
 
     q = SSEQueue()
 
@@ -587,7 +598,7 @@ def get_videos(slug: str):
         "videos": [{"path": str(v), "filename": v.name} for v in vids]
     }
 
-# ── Settings ──────────────────────────────────────────────────────────────────
+# -- Settings -----------------------------------------------------------------
 
 @app.get("/api/settings")
 def get_settings():
@@ -599,7 +610,7 @@ def update_settings(body: dict):
     settings.update(body)
     return {"ok": True}
 
-# ── File serving ──────────────────────────────────────────────────────────────
+# -- File serving -------------------------------------------------------------
 
 @app.get("/api/files/image")
 def serve_image(path: str = Query(...)):
@@ -611,7 +622,7 @@ def serve_image(path: str = Query(...)):
         raise HTTPException(404, "Image not found.")
     return FileResponse(p)
 
-# ── Internal helper ───────────────────────────────────────────────────────────
+# -- Internal helper ----------------------------------------------------------
 
 def _load_project(slug: str) -> Project:
     output_dir = settings.resolve_output_dir()
@@ -621,7 +632,7 @@ def _load_project(slug: str) -> Project:
     except FileNotFoundError as exc:
         raise HTTPException(404, f"Project '{slug}' not found.") from exc
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# -- Entry point --------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
