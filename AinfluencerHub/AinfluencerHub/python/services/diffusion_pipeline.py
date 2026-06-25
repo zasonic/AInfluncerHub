@@ -172,8 +172,12 @@ def generate_dataset(
 
     try:
         _load_ip_adapter(hf_token)
-        # FaceID Plus V2 uses ArcFace embeddings, not a raw PIL image
-        face_embedding = _extract_face_embedding(reference_image)
+        # FaceID Plus V2 uses ArcFace embeddings, not a raw PIL image.
+        # normed_embedding is numpy (512,); diffusers expects a list of tensors
+        # shaped (batch_size, num_images, embed_dim) = (1, 1, 512).
+        import torch as _torch
+        face_emb_np = _extract_face_embedding(reference_image)
+        face_embedding = _torch.from_numpy(face_emb_np).float().unsqueeze(0).unsqueeze(0)
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():

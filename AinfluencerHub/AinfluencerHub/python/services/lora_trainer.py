@@ -27,6 +27,16 @@ v2.2 FLUX training improvements:
   Velocity target — FLUX uses FlowMatchEulerDiscreteScheduler (rectified
             flow), so the correct training objective is to predict the
             velocity field (noise - latents), not the epsilon noise.
+
+v2.3 training improvements (both SDXL and FLUX paths):
+  Prodigy optimizer — Mishchenko & Defazio (ICML 2023). Self-estimates the
+            optimal learning rate from gradient magnitudes; no LR tuning
+            needed for non-technical users. lr=1.0 is the conventional scale
+            parameter (Prodigy estimates the actual step size d internally).
+            Requires prodigyopt>=0.9.3; falls back to AdamW8bit → AdamW.
+  Logit-normal timesteps for SDXL — now matching the FLUX path (Esser et al.
+            2024). Biases sampling towards intermediate timesteps where the
+            gradient signal is richest. Falls back to uniform sampling.
 """
 
 import logging
@@ -251,31 +261,61 @@ def run_training(
     )
 
     # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────────
+    #
+    # Prodigy (Mishchenko & Defazio, ICML 2023): parameter-free optimizer that
+    # self-estimates the learning rate from gradient statistics.  Non-technical users
+    # get better convergence without touching the lr knob.
+    # Fallback chain: Prodigy → AdamW8bit → AdamW.
 
+    _prodigy_active = False
     try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(
+        from prodigyopt import Prodigy
+        optimizer = Prodigy(
             unet.parameters(),
-            lr=learning_rate,
+            lr=1.0,                  # scale factor; Prodigy estimates step size d internally
             weight_decay=1e-2,
+            decouple=True,           # decouple weight decay from the adaptive update
+            use_bias_correction=True,
         )
-        _emit("Using AdamW8bit optimizer.")
+        _prodigy_active = True
+        _emit(
+            "Using Prodigy optimizer (auto-LR — Mishchenko & Defazio, ICML 2023; "
+            "no learning-rate tuning needed)"
+        )
     except ImportError:
-        optimizer = torch.optim.AdamW(
-            unet.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-2,
-        )
-        _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using AdamW8bit optimizer (install prodigyopt for auto-LR).")
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using standard AdamW optimizer.")
 
     # Cosine LR scheduler with warmup
     warmup_steps = max(50, steps // 20)
     from torch.optim.lr_scheduler import CosineAnnealingLR
-    scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=steps - warmup_steps,
+        eta_min=0.1 if _prodigy_active else learning_rate * 0.1,
+    )
 
     # ── Step 6: Training loop ───────────────────────────────────────────────────────────
 
-    _emit(f"Starting training: {steps} steps, rank {rank}, lr {learning_rate}")
+    lr_info = "auto (Prodigy)" if _prodigy_active else f"{learning_rate:.2e}"
+    _emit(f"Starting training: {steps} steps, rank {rank}, lr {lr_info}")
+    _emit(
+        "Timestep sampling: logit-normal (Esser et al. 2024) — "
+        "biases towards informative intermediate timesteps"
+    )
 
     # Pre-compute alphas_cumprod for MinSNR-gamma weighting (done once, not per step)
     _alphas_cumprod_dev = noise_scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)
@@ -322,12 +362,22 @@ def run_training(
             # Pooled output from text_encoder_2
             pooled_prompt_embeds = encoder_output_2[0]
 
-        # Add noise
+        # Add noise — logit-normal timestep sampling (Esser et al. 2024).
+        # u ~ N(0,1), mapped to (0,1) via sigmoid, concentrates mass at
+        # intermediate timesteps that carry the most training signal.
+        # Falls back to uniform sampling on any error.
         noise = torch.randn_like(latents)
-        timesteps = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps,
-            (latents.shape[0],), device=device,
-        ).long()
+        try:
+            u = torch.randn(latents.shape[0])
+            t_frac = torch.sigmoid(u).to(device)
+            timesteps = (
+                t_frac * noise_scheduler.config.num_train_timesteps
+            ).long().clamp(0, noise_scheduler.config.num_train_timesteps - 1)
+        except Exception:
+            timesteps = torch.randint(
+                0, noise_scheduler.config.num_train_timesteps,
+                (latents.shape[0],), device=device,
+            ).long()
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
         # Time IDs for SDXL (original_size + crop_coords + target_size)
@@ -377,12 +427,12 @@ def run_training(
         if global_step % gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(unet.parameters(), 1.0)
             optimizer.step()
-            if global_step > warmup_steps:
+            if global_step > warmup_steps or _prodigy_active:
                 scheduler.step()
             optimizer.zero_grad()
 
-        # Warmup (linear)
-        if global_step <= warmup_steps:
+        # Warmup (linear) — skipped for Prodigy, which self-adapts from step 1
+        if not _prodigy_active and global_step <= warmup_steps:
             warmup_lr = learning_rate * (global_step / warmup_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
@@ -392,7 +442,11 @@ def run_training(
             avg_loss = running_loss / 10 if global_step > 10 else running_loss
             running_loss = 0.0
             current_lr = optimizer.param_groups[0]["lr"]
-            _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
+            if _prodigy_active:
+                d_val = getattr(optimizer, "d", 1.0)
+                _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  d: {d_val:.3e}  eff_lr: {current_lr * d_val:.2e}")
+            else:
+                _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
 
         # Save checkpoint
         if global_step % save_every == 0 and global_step < steps:
@@ -605,24 +659,50 @@ def _run_flux_training(
     )
 
     # ── Optimizer ─────────────────────────────────────────────────────────────────────
+    #
+    # Prodigy (Mishchenko & Defazio, ICML 2023): parameter-free optimizer that
+    # self-estimates the learning rate from gradient statistics.  Non-technical users
+    # get better convergence without touching the lr knob.
+    # Fallback chain: Prodigy → AdamW8bit → AdamW.
 
+    _flux_prodigy_active = False
     try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(transformer.parameters(), lr=learning_rate, weight_decay=1e-2)
-        _emit("Using AdamW8bit optimizer.")
-    except ImportError:
-        optimizer = torch.optim.AdamW(
-            transformer.parameters(), lr=learning_rate, weight_decay=1e-2,
+        from prodigyopt import Prodigy
+        optimizer = Prodigy(
+            transformer.parameters(),
+            lr=1.0,                  # scale factor; Prodigy estimates step size d internally
+            weight_decay=1e-2,
+            decouple=True,
+            use_bias_correction=True,
         )
-        _emit("Using standard AdamW optimizer.")
+        _flux_prodigy_active = True
+        _emit(
+            "Using Prodigy optimizer (auto-LR — Mishchenko & Defazio, ICML 2023; "
+            "no learning-rate tuning needed)"
+        )
+    except ImportError:
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(transformer.parameters(), lr=learning_rate, weight_decay=1e-2)
+            _emit("Using AdamW8bit optimizer (install prodigyopt for auto-LR).")
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                transformer.parameters(), lr=learning_rate, weight_decay=1e-2,
+            )
+            _emit("Using standard AdamW optimizer.")
 
     warmup_steps = max(50, steps // 20)
     from torch.optim.lr_scheduler import CosineAnnealingLR
-    lr_scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    lr_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=steps - warmup_steps,
+        eta_min=0.1 if _flux_prodigy_active else learning_rate * 0.1,
+    )
 
     # ── Training loop ─────────────────────────────────────────────────────────────────────
 
-    _emit(f"Starting FLUX LoRA training: {steps} steps, rank {rank}, lr {learning_rate}")
+    flux_lr_info = "auto (Prodigy)" if _flux_prodigy_active else f"{learning_rate:.2e}"
+    _emit(f"Starting FLUX LoRA training: {steps} steps, rank {rank}, lr {flux_lr_info}")
     _emit(
         "Timestep sampling: logit-normal (Esser et al. 2024) — "
         "biases towards informative intermediate timesteps for flow matching"
@@ -701,11 +781,12 @@ def _run_flux_training(
         if global_step % gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(transformer.parameters(), 1.0)
             optimizer.step()
-            if global_step > warmup_steps:
+            if global_step > warmup_steps or _flux_prodigy_active:
                 lr_scheduler.step()
             optimizer.zero_grad()
 
-        if global_step <= warmup_steps:
+        # Warmup (linear) — skipped for Prodigy, which self-adapts from step 1
+        if not _flux_prodigy_active and global_step <= warmup_steps:
             warmup_lr = learning_rate * (global_step / warmup_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
@@ -714,7 +795,11 @@ def _run_flux_training(
             avg_loss = running_loss / 10 if global_step > 10 else running_loss
             running_loss = 0.0
             current_lr = optimizer.param_groups[0]["lr"]
-            _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
+            if _flux_prodigy_active:
+                d_val = getattr(optimizer, "d", 1.0)
+                _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  d: {d_val:.3e}  eff_lr: {current_lr * d_val:.2e}")
+            else:
+                _emit(f"step: {global_step}/{steps}  loss: {avg_loss:.4f}  lr: {current_lr:.2e}")
 
         if global_step % save_every == 0 and global_step < steps:
             ckpt_path = output_dir / f"flux-checkpoint-{global_step}"
