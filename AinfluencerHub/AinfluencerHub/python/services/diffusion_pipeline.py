@@ -172,8 +172,22 @@ def generate_dataset(
 
     try:
         _load_ip_adapter(hf_token)
-        # FaceID Plus V2 uses ArcFace embeddings, not a raw PIL image
+
+        # VAE tiling prevents OOM on ≤10 GB VRAM at 1216 height
+        if hasattr(_pipeline, "enable_vae_tiling"):
+            try:
+                _pipeline.enable_vae_tiling()
+            except Exception:
+                pass
+
+        # FaceID Plus V2 needs BOTH:
+        #   ip_adapter_image      — PIL face crop for the CLIP image encoder
+        #   ip_adapter_image_embeds — ArcFace embedding tensor shaped [1, 1, 512]
         face_embedding = _extract_face_embedding(reference_image)
+        face_pil = _prepare_face_image(reference_image)
+
+        import torch
+        face_embeds_tensor = torch.from_numpy(face_embedding).unsqueeze(0).unsqueeze(0)
 
         for i, prompt in enumerate(prompts):
             if cancel_event and cancel_event.is_set():
@@ -185,14 +199,17 @@ def generate_dataset(
                 progress_cb(i, total, f"Generating {i + 1}/{total}: {label}")
 
             seed = random.randint(0, 2**32 - 1)
-            import torch
             generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
 
             try:
                 result = _pipeline(
                     prompt=full_prompt,
-                    negative_prompt="blurry, low quality, watermark, text, deformed",
-                    ip_adapter_image_embeds=[face_embedding],
+                    negative_prompt=(
+                        "blurry, low quality, watermark, text, deformed, "
+                        "extra fingers, bad anatomy, worst quality"
+                    ),
+                    ip_adapter_image=[face_pil],
+                    ip_adapter_image_embeds=[face_embeds_tensor],
                     num_inference_steps=20,
                     guidance_scale=4.0,
                     width=832,
@@ -243,6 +260,13 @@ def generate_image(
 
     try:
         _load_base_pipeline(hf_token)
+
+        # VAE tiling prevents OOM on ≤10 GB VRAM at tall resolutions
+        if hasattr(_pipeline, "enable_vae_tiling"):
+            try:
+                _pipeline.enable_vae_tiling()
+            except Exception:
+                pass
 
         if progress_cb:
             progress_cb("Loading pipeline...")

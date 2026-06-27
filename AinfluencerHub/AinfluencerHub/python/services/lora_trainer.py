@@ -252,26 +252,43 @@ def run_training(
 
     # ── Step 5: Optimizer & scheduler ────────────────────────────────────────────────
 
+    _using_prodigy = False
     try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(
+        from prodigyopt import Prodigy
+        optimizer = Prodigy(
             unet.parameters(),
-            lr=learning_rate,
+            lr=1.0,
             weight_decay=1e-2,
+            d_coef=2.0,
+            use_bias_correction=True,
         )
-        _emit("Using AdamW8bit optimizer.")
+        _using_prodigy = True
+        _emit("Using Prodigy optimizer (auto-adapts learning rate — no tuning needed).")
     except ImportError:
-        optimizer = torch.optim.AdamW(
-            unet.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-2,
-        )
-        _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
+        try:
+            from bitsandbytes.optim import AdamW8bit
+            optimizer = AdamW8bit(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using AdamW8bit optimizer (install prodigyopt for auto LR).")
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                unet.parameters(),
+                lr=learning_rate,
+                weight_decay=1e-2,
+            )
+            _emit("Using standard AdamW optimizer (install bitsandbytes for 8-bit).")
 
-    # Cosine LR scheduler with warmup
+    # Cosine LR scheduler with warmup (skipped for Prodigy — it self-schedules)
     warmup_steps = max(50, steps // 20)
-    from torch.optim.lr_scheduler import CosineAnnealingLR
-    scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
+    if _using_prodigy:
+        from torch.optim.lr_scheduler import ConstantLR
+        scheduler = ConstantLR(optimizer, factor=1.0)
+    else:
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(optimizer, T_max=steps - warmup_steps, eta_min=learning_rate * 0.1)
 
     # ── Step 6: Training loop ───────────────────────────────────────────────────────────
 
@@ -381,8 +398,8 @@ def run_training(
                 scheduler.step()
             optimizer.zero_grad()
 
-        # Warmup (linear)
-        if global_step <= warmup_steps:
+        # Warmup (linear) — skipped for Prodigy, which adapts LR automatically
+        if not _using_prodigy and global_step <= warmup_steps:
             warmup_lr = learning_rate * (global_step / warmup_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
