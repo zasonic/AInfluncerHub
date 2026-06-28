@@ -15,12 +15,13 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from services.models import IP_ADAPTER, SDXL_BASE
+from services.models import FLUX_BASE, IP_ADAPTER, SDXL_BASE
 
 log = logging.getLogger("hub.diffusion")
 
 # Lazy globals — loaded on demand, freed after use
 _pipeline = None
+_flux_pipeline = None
 _ip_adapter_loaded = False
 _face_app = None
 
@@ -62,6 +63,69 @@ def _load_base_pipeline(hf_token: str = ""):
             pass  # xformers optional
 
     log.info("SDXL pipeline loaded.")
+
+
+def _is_flux_lora(lora_path: str) -> bool:
+    """Return True when the LoRA filename signals it was trained on FLUX.1-dev."""
+    return "flux" in Path(lora_path).name.lower()
+
+
+def _load_flux_pipeline(hf_token: str = ""):
+    """Load FLUX.1-dev pipeline; use NF4 quantization when VRAM < 16 GB."""
+    global _flux_pipeline
+    if _flux_pipeline is not None:
+        return
+
+    import torch
+    from diffusers import FluxPipeline
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    vram_gb = (
+        torch.cuda.get_device_properties(0).total_memory / 1e9
+        if torch.cuda.is_available()
+        else 0.0
+    )
+    # NF4 quantization lets FLUX.1-dev run in ~10-12 GB instead of 24 GB
+    use_nf4 = vram_gb > 0 and vram_gb < 16.0
+    log.info(
+        "Loading FLUX.1-dev on %s (VRAM=%.1f GB, NF4=%s) ...",
+        device, vram_gb, use_nf4,
+    )
+
+    token = hf_token or None
+
+    if use_nf4:
+        from transformers import BitsAndBytesConfig
+        from diffusers import FluxTransformer2DModel
+
+        nf4_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+        transformer = FluxTransformer2DModel.from_pretrained(
+            FLUX_BASE.repo_id,
+            subfolder="transformer",
+            quantization_config=nf4_config,
+            torch_dtype=torch.float16,
+            token=token,
+        )
+        _flux_pipeline = FluxPipeline.from_pretrained(
+            FLUX_BASE.repo_id,
+            transformer=transformer,
+            torch_dtype=torch.float16,
+            token=token,
+        )
+    else:
+        _flux_pipeline = FluxPipeline.from_pretrained(
+            FLUX_BASE.repo_id,
+            torch_dtype=torch.bfloat16,
+            token=token,
+        )
+
+    # CPU offload keeps peak VRAM low regardless of quantization choice
+    _flux_pipeline.enable_model_cpu_offload()
+    log.info("FLUX.1-dev pipeline loaded (NF4=%s).", use_nf4)
 
 
 def _load_ip_adapter(hf_token: str = ""):
@@ -130,12 +194,16 @@ def _prepare_face_image(image_path: Path):
 
 def unload() -> None:
     """Release all GPU memory."""
-    global _pipeline, _ip_adapter_loaded, _face_app
+    global _pipeline, _flux_pipeline, _ip_adapter_loaded, _face_app
 
     if _pipeline is not None:
         del _pipeline
         _pipeline = None
         _ip_adapter_loaded = False
+
+    if _flux_pipeline is not None:
+        del _flux_pipeline
+        _flux_pipeline = None
 
     if _face_app is not None:
         del _face_app
@@ -232,8 +300,11 @@ def generate_image(
     progress_cb: Callable[[str], None] | None = None,
 ) -> list[Path]:
     """
-    Generate an image using SDXL with optional LoRA.
-    Returns list of output file paths.
+    Generate an image using SDXL or FLUX.1-dev with optional LoRA.
+
+    When ``lora_path`` points to a FLUX LoRA (filename contains "flux"),
+    the function loads FLUX.1-dev with NF4 quantization on GPUs < 16 GB.
+    Otherwise it uses SDXL as before.  Returns list of output file paths.
     """
     import torch
 
@@ -241,46 +312,82 @@ def generate_image(
         output_dir = Path("output") / "generated"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if seed < 0:
+        seed = random.randint(0, 2**32 - 1)
+
+    use_flux = bool(lora_path) and _is_flux_lora(lora_path)
+
     try:
-        _load_base_pipeline(hf_token)
+        if use_flux:
+            _load_flux_pipeline(hf_token)
+            pipe = _flux_pipeline
 
-        if progress_cb:
-            progress_cb("Loading pipeline...")
-
-        # Load LoRA if provided
-        if lora_path and Path(lora_path).exists():
             if progress_cb:
-                progress_cb("Loading LoRA weights...")
-            _pipeline.load_lora_weights(
-                lora_path,
-                adapter_name="user_lora",
+                progress_cb("Loading FLUX pipeline...")
+
+            if lora_path and Path(lora_path).exists():
+                if progress_cb:
+                    progress_cb("Loading FLUX LoRA weights...")
+                pipe.load_lora_weights(lora_path, adapter_name="user_lora")
+                pipe.set_adapters(["user_lora"], adapter_weights=[lora_strength])
+                log.info("FLUX LoRA loaded: %s (strength=%.2f)", lora_path, lora_strength)
+
+            # CPU generator is safe with enable_model_cpu_offload
+            generator = torch.Generator("cpu").manual_seed(seed)
+
+            if progress_cb:
+                progress_cb("Generating image with FLUX...")
+
+            result = pipe(
+                prompt=positive_prompt,
+                num_inference_steps=steps,
+                guidance_scale=3.5,
+                width=width,
+                height=height,
+                generator=generator,
+                max_sequence_length=512,
             )
-            _pipeline.set_adapters(["user_lora"], adapter_weights=[lora_strength])
-            log.info("LoRA loaded: %s (strength=%.2f)", lora_path, lora_strength)
 
-        if seed < 0:
-            seed = random.randint(0, 2**32 - 1)
+            paths: list[Path] = []
+            for idx, image in enumerate(result.images):
+                out_path = output_dir / f"flux_{seed}_{idx}.png"
+                image.save(out_path)
+                paths.append(out_path)
 
-        generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
+        else:
+            _load_base_pipeline(hf_token)
+            pipe = _pipeline
 
-        if progress_cb:
-            progress_cb("Generating image...")
+            if progress_cb:
+                progress_cb("Loading pipeline...")
 
-        result = _pipeline(
-            prompt=positive_prompt,
-            negative_prompt=negative_prompt,
-            num_inference_steps=steps,
-            guidance_scale=cfg,
-            width=width,
-            height=height,
-            generator=generator,
-        )
+            if lora_path and Path(lora_path).exists():
+                if progress_cb:
+                    progress_cb("Loading LoRA weights...")
+                pipe.load_lora_weights(lora_path, adapter_name="user_lora")
+                pipe.set_adapters(["user_lora"], adapter_weights=[lora_strength])
+                log.info("LoRA loaded: %s (strength=%.2f)", lora_path, lora_strength)
 
-        paths: list[Path] = []
-        for idx, image in enumerate(result.images):
-            out_path = output_dir / f"gen_{seed}_{idx}.png"
-            image.save(out_path)
-            paths.append(out_path)
+            generator = torch.Generator(device=pipe.device).manual_seed(seed)
+
+            if progress_cb:
+                progress_cb("Generating image...")
+
+            result = pipe(
+                prompt=positive_prompt,
+                negative_prompt=negative_prompt,
+                num_inference_steps=steps,
+                guidance_scale=cfg,
+                width=width,
+                height=height,
+                generator=generator,
+            )
+
+            paths = []
+            for idx, image in enumerate(result.images):
+                out_path = output_dir / f"gen_{seed}_{idx}.png"
+                image.save(out_path)
+                paths.append(out_path)
 
         if progress_cb:
             progress_cb(f"Generated {len(paths)} image(s).")
@@ -288,10 +395,11 @@ def generate_image(
         return paths
 
     finally:
-        # Unload LoRA weights to avoid contaminating next generation
-        if lora_path and _pipeline is not None:
+        # Unload LoRA weights so they don't bleed into the next generation
+        active_pipe = _flux_pipeline if use_flux else _pipeline
+        if lora_path and active_pipe is not None:
             try:
-                _pipeline.unload_lora_weights()
+                active_pipe.unload_lora_weights()
             except Exception:
                 pass
         unload()
