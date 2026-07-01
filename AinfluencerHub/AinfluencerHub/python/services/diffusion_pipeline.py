@@ -128,6 +128,19 @@ def _prepare_face_image(image_path: Path):
     return img
 
 
+def _make_step_callback(image_idx: int, total_images: int, num_steps: int, cb):
+    """Return a callback_on_step_end function that reports per-step progress.
+
+    Using a factory avoids the loop-closure bug where all lambdas would share
+    the same `image_idx` reference by the time they fire.
+    """
+    def _step(pipe, step, timestep, callback_kwargs):
+        if cb:
+            cb(image_idx, total_images, f"Image {image_idx + 1}/{total_images} — step {step + 1}/{num_steps}")
+        return callback_kwargs
+    return _step
+
+
 def unload() -> None:
     """Release all GPU memory."""
     global _pipeline, _ip_adapter_loaded, _face_app
@@ -182,22 +195,25 @@ def generate_dataset(
             full_prompt = f"{trigger_word}, {prompt}" if trigger_word else prompt
             label = prompt[:50] + "..." if len(prompt) > 50 else prompt
             if progress_cb:
-                progress_cb(i, total, f"Generating {i + 1}/{total}: {label}")
+                progress_cb(i, total, f"Starting image {i + 1}/{total}: {label}")
 
             seed = random.randint(0, 2**32 - 1)
             import torch
             generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
 
+            _dataset_steps = 20
             try:
                 result = _pipeline(
                     prompt=full_prompt,
                     negative_prompt="blurry, low quality, watermark, text, deformed",
                     ip_adapter_image_embeds=[face_embedding],
-                    num_inference_steps=20,
+                    num_inference_steps=_dataset_steps,
                     guidance_scale=4.0,
                     width=832,
                     height=1216,
                     generator=generator,
+                    callback_on_step_end=_make_step_callback(i, total, _dataset_steps, progress_cb),
+                    callback_on_step_end_tensor_inputs=[],
                 )
                 image = result.images[0]
                 out_path = output_dir / f"dataset_{len(paths) + 1:03d}.jpg"
@@ -264,7 +280,12 @@ def generate_image(
         generator = torch.Generator(device=_pipeline.device).manual_seed(seed)
 
         if progress_cb:
-            progress_cb("Generating image...")
+            progress_cb(f"Generating image (0/{steps} steps)...")
+
+        def _image_step_cb(pipe, step, timestep, callback_kwargs):
+            if progress_cb:
+                progress_cb(f"Generating — step {step + 1}/{steps}")
+            return callback_kwargs
 
         result = _pipeline(
             prompt=positive_prompt,
@@ -274,6 +295,8 @@ def generate_image(
             width=width,
             height=height,
             generator=generator,
+            callback_on_step_end=_image_step_cb,
+            callback_on_step_end_tensor_inputs=[],
         )
 
         paths: list[Path] = []

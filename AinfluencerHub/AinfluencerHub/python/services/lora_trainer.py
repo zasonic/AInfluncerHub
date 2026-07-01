@@ -547,7 +547,7 @@ def _run_flux_training(
 
     from peft import LoraConfig, get_peft_model
 
-    lora_config = LoraConfig(
+    _flux_lora_base_kwargs = dict(
         r=rank,
         lora_alpha=rank,
         init_lora_weights="gaussian",
@@ -556,6 +556,18 @@ def _run_flux_training(
             "add_k_proj", "add_q_proj", "add_v_proj", "add_out_proj",
         ],
     )
+
+    # DoRA (Liu et al., ICLR 2024): same improvement as the SDXL path —
+    # decomposes LoRA updates into magnitude + direction for better gradient
+    # flow and sharper face-identity retention. Requires peft >= 0.9.0;
+    # older installs fall back to standard LoRA silently.
+    try:
+        lora_config = LoraConfig(**_flux_lora_base_kwargs, use_dora=True)
+        _emit("LoRA adapter: DoRA enabled (Weight-Decomposed, peft>=0.9.0) — improved identity consistency")
+    except TypeError:
+        lora_config = LoraConfig(**_flux_lora_base_kwargs)
+        _emit("LoRA adapter: standard LoRA (upgrade peft>=0.9.0 to enable DoRA for better results)")
+
     transformer = get_peft_model(transformer, lora_config)
     transformer.train()
 
